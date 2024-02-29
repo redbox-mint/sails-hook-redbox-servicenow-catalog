@@ -1,11 +1,11 @@
 import {Sails, Model} from 'sails';
 import {Observable, from, of, throwError} from 'rxjs';
 import * as numeral from 'numeral';
-// import * as got from 'got';
 import moment = require('moment');
 import axios from 'axios';
 const util = require('util');
 import { RecordsService, Services as services} from '@researchdatabox/redbox-core-types';
+import {clientFactory, interceptorFactory} from '@scienta/axios-oauth2';
 
 declare var sails: Sails;
 declare var WorkspaceService, _;
@@ -70,9 +70,72 @@ export module Services {
       const axiosOptions = this.getConfig('catalog.axios', options);
       axiosOptions.data = body_template;
       sails.log.verbose(JSON.stringify(axiosOptions));
+      
       let snResponse = null;
       try {
+        const oauthOptions = this.getConfig('catalog.oauth', options);
+        sails.log.verbose(JSON.stringify(oauthOptions));
+        let oauthEnabled = _.get(oauthOptions, 'enabled', 'false');
+        sails.log.verbose('OAuth enabled '+oauthEnabled);
+        if(oauthEnabled == 'true') {
+          let oauthUrl = _.get(oauthOptions, 'url');
+          let oauthClientId = _.get(oauthOptions, 'clientId');
+          let oauthClientSecret = _.get(oauthOptions, 'clientSecret');
+          let oauthScope = _.get(oauthOptions, 'scope');
+          let oauthGrantType = _.get(oauthOptions, 'grantType');
+          sails.log.verbose('================================================');
+          sails.log.verbose('oauthUrl '+oauthUrl);
+          sails.log.verbose('oauthClientId '+oauthClientId);
+          sails.log.verbose('oauthClientSecret '+oauthClientSecret);
+          sails.log.verbose('oauthScope '+oauthScope);
+          sails.log.verbose('oauthGrantType '+oauthGrantType);
+
+          let oauthConfig = {};
+          if(oauthGrantType == 'password') {
+            let oauthUsername = _.get(oauthOptions, 'username');
+            let oauthPassword = _.get(oauthOptions, 'password');
+            sails.log.verbose('oauthUsername '+oauthUsername);
+            sails.log.verbose('oauthPassword '+oauthPassword);
+            oauthConfig = {
+              url: oauthUrl,
+              grant_type: oauthGrantType,
+              client_id: oauthClientId,
+              client_secret: oauthClientSecret,
+              scope: oauthScope,
+              username: oauthUsername,
+              password: oauthPassword
+            };
+          } else if(oauthGrantType == 'refresh_token') {
+            let oauthRefreshToken = _.get(oauthOptions, 'refreshToken');
+            oauthConfig = {
+              url: oauthUrl,
+              grant_type: oauthGrantType,
+              client_id: oauthClientId,
+              client_secret: oauthClientSecret,
+              scope: oauthScope,
+              'refresh_token': oauthRefreshToken
+            };
+          } else {
+            oauthConfig = {
+              url: oauthUrl,
+              grant_type: 'client_credentials',
+              client_id: oauthClientId,
+              client_secret: oauthClientSecret,
+              scope: oauthScope
+            };
+          }
+
+          //@ts-ignore
+          const client = clientFactory(axios.create(), oauthConfig);
+          const auth1 = await client();
+          sails.log.verbose(JSON.stringify(auth1));
+          sails.log.verbose('================================================');
+
+          _.set(axiosOptions, 'headers.Authorization', 'Bearer '+ _.get(auth1, 'access_token'));
+        } 
+          
         snResponse = await axios(axiosOptions);
+
       } catch (err) {
         sails.log.error(`ServiceNowCatalog failed to submit to request for workspace OID: ${oid}, error is:`);
         sails.log.error(JSON.stringify(err));

@@ -1,4 +1,23 @@
 "use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    Object.defineProperty(o, k2, { enumerable: true, get: function() { return m[k]; } });
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || function (mod) {
+    if (mod && mod.__esModule) return mod;
+    var result = {};
+    if (mod != null) for (var k in mod) if (k !== "default" && Object.prototype.hasOwnProperty.call(mod, k)) __createBinding(result, mod, k);
+    __setModuleDefault(result, mod);
+    return result;
+};
 var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
     function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
     return new (P || (P = Promise))(function (resolve, reject) {
@@ -8,13 +27,17 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
         step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
 };
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.Services = void 0;
-const numeral = require("numeral");
+const numeral = __importStar(require("numeral"));
 const moment = require("moment");
-const axios_1 = require("axios");
+const axios_1 = __importDefault(require("axios"));
 const util = require('util');
 const redbox_core_types_1 = require("@researchdatabox/redbox-core-types");
+const axios_oauth2_1 = require("@scienta/axios-oauth2");
 var Services;
 (function (Services) {
     class ServicenowCatalogService extends redbox_core_types_1.Services.Core.Service {
@@ -63,6 +86,64 @@ var Services;
                 sails.log.verbose(JSON.stringify(axiosOptions));
                 let snResponse = null;
                 try {
+                    const oauthOptions = this.getConfig('catalog.oauth', options);
+                    sails.log.verbose(JSON.stringify(oauthOptions));
+                    let oauthEnabled = _.get(oauthOptions, 'enabled', 'false');
+                    sails.log.verbose('OAuth enabled ' + oauthEnabled);
+                    if (oauthEnabled == 'true') {
+                        let oauthUrl = _.get(oauthOptions, 'url');
+                        let oauthClientId = _.get(oauthOptions, 'clientId');
+                        let oauthClientSecret = _.get(oauthOptions, 'clientSecret');
+                        let oauthScope = _.get(oauthOptions, 'scope');
+                        let oauthGrantType = _.get(oauthOptions, 'grantType');
+                        sails.log.verbose('================================================');
+                        sails.log.verbose('oauthUrl ' + oauthUrl);
+                        sails.log.verbose('oauthClientId ' + oauthClientId);
+                        sails.log.verbose('oauthClientSecret ' + oauthClientSecret);
+                        sails.log.verbose('oauthScope ' + oauthScope);
+                        sails.log.verbose('oauthGrantType ' + oauthGrantType);
+                        let oauthConfig = {};
+                        if (oauthGrantType == 'password') {
+                            let oauthUsername = _.get(oauthOptions, 'username');
+                            let oauthPassword = _.get(oauthOptions, 'password');
+                            sails.log.verbose('oauthUsername ' + oauthUsername);
+                            sails.log.verbose('oauthPassword ' + oauthPassword);
+                            oauthConfig = {
+                                url: oauthUrl,
+                                grant_type: oauthGrantType,
+                                client_id: oauthClientId,
+                                client_secret: oauthClientSecret,
+                                scope: oauthScope,
+                                username: oauthUsername,
+                                password: oauthPassword
+                            };
+                        }
+                        else if (oauthGrantType == 'refresh_token') {
+                            let oauthRefreshToken = _.get(oauthOptions, 'refreshToken');
+                            oauthConfig = {
+                                url: oauthUrl,
+                                grant_type: oauthGrantType,
+                                client_id: oauthClientId,
+                                client_secret: oauthClientSecret,
+                                scope: oauthScope,
+                                'refresh_token': oauthRefreshToken
+                            };
+                        }
+                        else {
+                            oauthConfig = {
+                                url: oauthUrl,
+                                grant_type: 'client_credentials',
+                                client_id: oauthClientId,
+                                client_secret: oauthClientSecret,
+                                scope: oauthScope
+                            };
+                        }
+                        const client = (0, axios_oauth2_1.clientFactory)(axios_1.default.create(), oauthConfig);
+                        const auth1 = yield client();
+                        sails.log.verbose(JSON.stringify(auth1));
+                        sails.log.verbose('================================================');
+                        _.set(axiosOptions, 'headers.Authorization', 'Bearer ' + _.get(auth1, 'access_token'));
+                    }
                     snResponse = yield (0, axios_1.default)(axiosOptions);
                 }
                 catch (err) {
@@ -97,9 +178,10 @@ var Services;
         }
         runDataRemap(source, target, fields) {
             for (const fieldDef of fields) {
-                const source_field = fieldDef.source_field;
-                const dest_field = fieldDef.dest_field;
-                const dest_template = fieldDef.dest_template;
+                const source_field = _.get(fieldDef, 'source_field');
+                const dest_field = _.get(fieldDef, 'dest_field');
+                const dest_template = _.get(fieldDef, 'dest_template');
+                let parseObject = _.get(fieldDef, 'parseObject', false);
                 let src_data = null;
                 if (!_.isEmpty(source_field)) {
                     src_data = _.get(source, source_field);
@@ -111,7 +193,13 @@ var Services;
                     src_data = template();
                 }
                 if (!_.isEmpty(dest_field)) {
-                    _.set(target, dest_field, src_data);
+                    if (parseObject) {
+                        let obj = JSON.parse(src_data);
+                        _.set(target, dest_field, obj);
+                    }
+                    else {
+                        _.set(target, dest_field, src_data);
+                    }
                 }
             }
             return target;
