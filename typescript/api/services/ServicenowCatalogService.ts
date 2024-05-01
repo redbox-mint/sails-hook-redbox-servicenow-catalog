@@ -148,8 +148,13 @@ export module Services {
         if (snResponse.status == 200) {
           const updateSource = snResponse.data;
           // perform any updates to the workspace record ...
+          updateSource.workspace = workspaceData;
           workspaceData = this.runDataRemap(updateSource, workspaceData, this.getConfig('catalog.update_fields', options));
-          await RecordsService.updateMeta(null, oid, workspaceData);
+          const updateResp = await RecordsService.updateMeta(null, oid, workspaceData);
+          // As of writing, the `response` object holds the state of the `addWorkspaceToRecord` call. For backwards-compat adding an attribute to return the workspace update instead
+          if (this.getConfig('returnWorkspaceUpdate', options)) {
+            response = updateResp;
+          }
         } else {
           sails.log.error(`ServiceNowCatalog submit request failed for workspace OID: ${oid}, check server logs.`);
           sails.log.error(JSON.stringify(snResponse));
