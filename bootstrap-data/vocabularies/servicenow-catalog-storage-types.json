@@ -1,0 +1,12 @@
+{
+  "name": "ServiceNow Catalog Storage Types",
+  "slug": "servicenow-catalog-storage-types",
+  "description": "Storage types available when creating a ServiceNow catalog request.",
+  "type": "flat",
+  "entries": [
+    { "label": "@servicenow-catalog-storage-type-hpc", "value": "@servicenow-catalog-storage-type-hpc", "order": 0 },
+    { "label": "@servicenow-catalog-storage-type-cloudstor", "value": "@servicenow-catalog-storage-type-cloudstor", "order": 1 },
+    { "label": "@servicenow-catalog-storage-type-s3", "value": "@servicenow-catalog-storage-type-s3", "order": 2 },
+    { "label": "@servicenow-catalog-storage-type-gcp", "value": "@servicenow-catalog-storage-type-gcp", "order": 3 }
+  ]
+}

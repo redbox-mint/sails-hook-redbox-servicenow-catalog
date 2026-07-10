@@ -1,85 +1,81 @@
-## A Sails Hook Redbox Catalog
+# ServiceNow Catalog Hook for ReDBox v5
 
-A sails hook that adds service-now integration into redbox-portal
+This Sails hook adds a ServiceNow-backed workspace record type to ReDBox. Creating a
+`servicenow-catalog` workspace can submit a configured ServiceNow catalog request,
+write the returned ServiceNow identifiers onto the workspace, and associate the
+workspace with its parent research data management plan.
 
-## api
+## ReDBox v5 structure
 
-Main API of your Hook can be stored in controllers and services
+- `src/index.ts` registers hook config, routes, controllers, services, and forms.
+- `src/config` contains typed ServiceNow, record type, workflow, authorization, and workspace type config.
+- `src/form-config` contains the draft, provisioning, and provisioned form stages.
+- `bootstrap-data/vocabularies` contains the production option vocabularies used by the forms.
+- `language-defaults/en/translation.json` contains the hook's default English labels.
+- `legacy-form-config` preserves the source v4 form and the single-form wrappers used by the migration tool.
 
-- controllers
-- services
-  
-## config & form-config
+The legacy Angular 5 catalog app remains under `angular/catalog` as migration evidence.
+It depends on the removed v4 shared Angular tree and is not part of the v5 build.
 
-This configurations are redbox-portal dependent. They will allow redbox to be available as a record
-If you require to have a form in your portal
+## Configuration
 
-- `config/recordtype`
-- `config/workflow`
-- `form-config/catalog-1.0-draft`
+The record trigger uses the brand-aware `servicenowCatalog` application configuration.
+It is disabled by default. Configure and enable it independently for each brand through
+the ReDBox Application Configuration administration interface.
 
-## index
-
-Main entry point for the hook
-
-### initialize
-
-Init code before it gets hooked. 
-
-### routes
-
-Controller routes exposed to the sails front-end
-
-```javascript
-  'post /:branding/:portal/ws/catalog/rdmp': CatalogController.rdmpInfo,
-  'post /:branding/:portal/ws/catalog/request': CatalogController.request
+```json
+{
+  "enabled": true,
+  "connection": {
+    "url": "https://example.service-now.com/api/sn_sc/servicecatalog/items/ITEM_ID/order_now",
+    "method": "post",
+    "headers": {
+      "Authorization": "Basic BASE64_CREDENTIALS"
+    },
+    "timeoutMs": 30000,
+    "totalTimeoutMs": 120000,
+    "retry": {
+      "maxAttempts": 3,
+      "baseDelayMs": 1000,
+      "maxDelayMs": 10000,
+      "retryOnStatusCodes": [408, 429, 500, 502, 503, 504]
+    }
+  },
+  "requestFields": [
+    {
+      "destination": "variables.short_description",
+      "source": { "kind": "handlebars", "template": "{{workspace.metadata.title}}" }
+    },
+    {
+      "destination": "variables.requested_size",
+      "source": { "kind": "jsonata", "expression": "workspace.metadata.storage_size" }
+    }
+  ]
+}
 ```
 
-### configure
+Mappings use the same path, Handlebars, and JSONata value-binding model as the core DOI
+and Figshare integrations. Response mappings write ServiceNow identifiers back to the
+workspace. Trigger options can override the brand configuration for a single run.
 
-Configuration and services to your sails app
+OAuth client-credentials, password, and refresh-token grants are supported through the
+`oauth` block. Application Configuration masks OAuth secrets and the Authorization
+header; do not commit raw credentials to this hook.
 
-```javascript
-  sails.services['CatalogService'] = CatalogService;
+The compatibility endpoints under `/:branding/:portal/ws/catalog` use the legacy
+`sails.config.workspaces.catalog` settings when the standalone workspace flow is still enabled.
+
+## Development
+
+```bash
+npm install
+npm run compile
+npm run test:unit
+redbox-dev-tools check
 ```
 
-## Development in redbox-portal
+The Docker-backed portal integration harness is available with:
 
-A docker-compose.yml file is present in support/development and is setup to run the full ReDBox stack and install the hook. To run the stack there is a ReDBox Sails Hook Run Utility in the root of the project
-
-### Usage #1
+```bash
+npm run test:integration:mocha
 ```
-ReDBox Sails Hook Run Utility
-Usage: ./runForDev.sh [-a|--(no-)angular] [-h|--help]
-	-a,--angular,--no-angular: Angular mode. Will ensure permissions are set correctly on the Sails working directory so that changes can be applied (off by default)
-	-h,--help: Prints help
-```
-
-Note: The first time the stack runs it may take some time as yarn initialises the hook within ReDBox Portal. All subsequent runs should be faster
-
-### Usage #2
-
-Using Vagrant : https://github.com/moisbo/vagrant-redbox-dev
-
-And configure sync
-
-config.vm.synced_folder "{source}/sails-hook-redbox-catalog", "/opt/hooks/sails-hook-redbox-catalog", id: "catalog"
-
-## Example:
-
-Service Catalog as stand alone hook:
-
-http://localhost:1500/default/{branding}/catalog/edit?rdmp={redbox_oid}
-
-![](./support/doc/images/service-catalog.png)
-
-Or integrated into rdmp
-
-![](./support/doc/images/service-catalog-in-rdmp.png)
-
-Example: eResearch Storage
-
-![](./support/doc/images/service-catalog-storage.png)
-
-
-

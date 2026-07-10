@@ -1,0 +1,92 @@
+import '@researchdatabox/redbox-core';
+import { defineRedboxHook, type HookRegistrationMap } from '@researchdatabox/redbox-core';
+import type { FormConfigFrame } from '@researchdatabox/sails-ng-common';
+import { SERVICENOW_CATALOG_CONFIG_MODEL } from './api/configmodels/ServiceNowCatalogAppConfig';
+import type { HookRedboxControllers } from './api/controllers';
+import type { HookRedboxServices } from './api/services';
+import { auth } from './config/auth';
+import { recordtypes } from './config/recordtypes';
+import { servicenowCatalog } from './config/servicenow';
+import { workflows } from './config/workflows';
+import { workspacetypes } from './config/workspacetypes';
+
+export {};
+
+const hook = defineRedboxHook({
+  initialize(sails, done) {
+    sails.after('hook:moduleloader:loaded', () => {
+      try {
+        const appConfigService = (sails.services as Record<string, unknown>)?.['appconfigservice'] as {
+          registerConfigModel?: (model: Record<string, unknown>) => void;
+        } | undefined;
+        if (appConfigService?.registerConfigModel == null) {
+          sails.log.warn(
+            'sails-hook-redbox-servicenow-catalog: AppConfigService is unavailable; ' +
+            'skipping ServiceNow config model registration.'
+          );
+          return;
+        }
+        appConfigService.registerConfigModel({ ...SERVICENOW_CATALOG_CONFIG_MODEL });
+      } catch (error) {
+        sails.log.error(
+          'sails-hook-redbox-servicenow-catalog: Failed to register the ServiceNow config model:',
+          error
+        );
+      }
+    });
+    done();
+  },
+  routes() {
+    return {
+      before: {},
+      after: {
+        'POST /:branding/:portal/ws/catalog/rdmp': {
+          controller: 'CatalogController',
+          action: 'rdmpInfo',
+          csrf: false
+        },
+        'POST /:branding/:portal/ws/catalog/request': {
+          controller: 'CatalogController',
+          action: 'request',
+          csrf: false
+        },
+        'GET /:branding/:portal/ws/catalog/info': {
+          controller: 'CatalogController',
+          action: 'info',
+          csrf: false
+        }
+      }
+    };
+  },
+  defaults: {
+    __configKey__: {
+      _hookTimeout: 120000
+    },
+    policies: {}
+  },
+  registerRedboxConfig(): HookRegistrationMap {
+    return {
+      auth,
+      recordtype: recordtypes,
+      servicenowCatalog,
+      workflow: workflows,
+      workspacetype: workspacetypes
+    };
+  },
+  registerRedboxControllers(): HookRedboxControllers {
+    return require('./api/controllers').ControllerExports as HookRedboxControllers;
+  },
+  registerRedboxServices(): HookRedboxServices {
+    return require('./api/services').ServiceExports as HookRedboxServices;
+  },
+  registerRedboxFormConfigs(): Record<string, FormConfigFrame> {
+    return require('./form-config').FormConfigExports as Record<string, FormConfigFrame>;
+  },
+  additionalExports: {
+    ControllerExports: require('./api/controllers').ControllerExports,
+    ServiceExports: require('./api/services').ServiceExports,
+    FormConfigExports: require('./form-config').FormConfigExports
+  }
+});
+
+module.exports = hook;
