@@ -79,3 +79,19 @@ The Docker-backed portal integration harness is available with:
 ```bash
 npm run test:integration:mocha
 ```
+
+## CI and releases
+
+CircleCI compiles and runs the unit suite for every branch. Stable Git tags matching
+`vMAJOR.MINOR.PATCH` run the same checks and publish the matching package version with
+the npm `latest` dist-tag.
+
+Beta packages are published by triggering a CircleCI pipeline with:
+
+- `npm_publish_mode`: `beta`
+- `npm_publish_version`: the stable base version, for example `1.2.3`
+- `npm_publish_dist_tag`: `beta`, `next`, or `alpha`
+
+The published prerelease version includes the pipeline number, such as
+`1.2.3-beta.456`. Publishing uses npm trusted publishing through the CircleCI
+`npm-publish` context.

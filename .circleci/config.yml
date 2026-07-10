@@ -1,27 +1,165 @@
 version: 2.1
+
+parameters:
+  npm_publish_mode:
+    type: enum
+    enum:
+      - none
+      - beta
+    default: none
+  npm_publish_version:
+    type: string
+    default: ""
+  npm_publish_dist_tag:
+    type: enum
+    enum:
+      - beta
+      - next
+      - alpha
+    default: beta
+
 jobs:
-  build_and_publish:
+  build:
     docker:
-      - image: cimg/node:24.16
-    working_directory: ~/repo
+      # Docker image major version must match .nvmrc.
+      - image: 'cimg/node:24.16'
     steps:
       - checkout
-      - run: npm ci
-      - run: npm run test:unit
-      - run: npx redbox-dev-tools check
+      - restore_cache:
+          keys:
+            - v1-node-{{ .Branch }}-{{ checksum "package-lock.json" }}
+            - v1-node-{{ .Branch }}
+            - v1-node
       - run:
-          name: Authenticate with NPM
-          command: echo "//registry.npmjs.org/:_authToken=$NPM_TOKEN" > ~/repo/.npmrc
+          name: Install packages
+          command: npm ci
+      - run:
+          name: Compile TypeScript
+          command: npm run compile
+      - run:
+          name: Validate hook dependency contract
+          command: npx redbox-dev-tools check
+      - save_cache:
+          key: v1-node-{{ .Branch }}-{{ checksum "package-lock.json" }}
+          paths:
+            - ~/.npm
+      - persist_to_workspace:
+          root: .
+          paths:
+            - .
+
+  test-unit:
+    docker:
+      # Docker image major version must match .nvmrc.
+      - image: 'cimg/node:24.16'
+    steps:
+      - attach_workspace:
+          at: /home/circleci/project
+      - run:
+          name: Run unit tests
+          command: npm run test:unit
+
+  npm-publish-package:
+    parameters:
+      release_kind:
+        type: enum
+        enum:
+          - beta
+          - release
+      release_version:
+        type: string
+        default: ""
+      dist_tag:
+        type: string
+        default: latest
+    docker:
+      # Docker image major version must match .nvmrc.
+      - image: 'cimg/node:24.16'
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - v1-node-{{ .Branch }}-{{ checksum "package-lock.json" }}
+            - v1-node-{{ .Branch }}
+            - v1-node
+      - run:
+          name: Install packages
+          command: npm ci
+      - run:
+          name: Get npm OIDC token
+          command: |
+            OIDC_TOKEN="$(circleci run oidc get --claims '{"aud": "npm:registry.npmjs.org"}')"
+            printf 'export NPM_ID_TOKEN=%q\n' "$OIDC_TOKEN" >> "$BASH_ENV"
       - run:
           name: Publish package
-          command: npm publish --access public
+          command: |
+            source "$BASH_ENV"
+            CIRCLE_PIPELINE_NUMBER="<< pipeline.number >>" \
+            NPM_RELEASE_KIND="<< parameters.release_kind >>" \
+            NPM_PUBLISH_VERSION="<< parameters.release_version >>" \
+            NPM_DIST_TAG="<< parameters.dist_tag >>" \
+            bash support/build/npm-publish-package.sh
 
 workflows:
-  publish:
+  branch-build-test:
+    when:
+      equal: [none, << pipeline.parameters.npm_publish_mode >>]
     jobs:
-      - build_and_publish:
+      - build:
+          filters:
+            branches:
+              only: /.*/
+            tags:
+              ignore: /.*/
+      - test-unit:
+          requires:
+            - build
+          filters:
+            branches:
+              only: /.*/
+            tags:
+              ignore: /.*/
+
+  tag-build-test-publish:
+    when:
+      equal: [none, << pipeline.parameters.npm_publish_mode >>]
+    jobs:
+      - build:
           filters:
             branches:
               ignore: /.*/
             tags:
-              only: /^v.*/
+              only: /^v[0-9]+\.[0-9]+\.[0-9]+$/
+      - test-unit:
+          requires:
+            - build
+          filters:
+            branches:
+              ignore: /.*/
+            tags:
+              only: /^v[0-9]+\.[0-9]+\.[0-9]+$/
+      - npm-publish-package:
+          name: publish-release
+          release_kind: release
+          release_version: ""
+          dist_tag: latest
+          context:
+            - npm-publish
+          requires:
+            - test-unit
+          filters:
+            branches:
+              ignore: /.*/
+            tags:
+              only: /^v[0-9]+\.[0-9]+\.[0-9]+$/
+
+  npm-beta-publish:
+    when:
+      equal: [beta, << pipeline.parameters.npm_publish_mode >>]
+    jobs:
+      - npm-publish-package:
+          release_kind: beta
+          release_version: << pipeline.parameters.npm_publish_version >>
+          dist_tag: << pipeline.parameters.npm_publish_dist_tag >>
+          context:
+            - npm-publish
