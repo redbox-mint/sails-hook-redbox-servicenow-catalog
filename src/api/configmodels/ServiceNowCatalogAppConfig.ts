@@ -1,4 +1,4 @@
-import { AppConfig, type ValueBinding as CoreValueBinding } from '@researchdatabox/redbox-core';
+import type { ValueBinding as CoreValueBinding } from '@researchdatabox/redbox-core';
 
 /** Brand-aware application configuration for the ServiceNow catalog integration. */
 
@@ -56,7 +56,7 @@ export interface ServiceNowCatalogConfigData {
   responseFields: ServiceNowFieldMapping[];
 }
 
-export class ServiceNowCatalogAppConfig extends AppConfig implements ServiceNowCatalogConfigData {
+export class ServiceNowCatalogAppConfig implements ServiceNowCatalogConfigData {
   enabled = false;
   connection: ServiceNowConnectionConfig = {
     url: '',

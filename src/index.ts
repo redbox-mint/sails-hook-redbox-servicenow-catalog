@@ -1,6 +1,7 @@
 import '@researchdatabox/redbox-core';
 import { defineRedboxHook, type HookRegistrationMap } from '@researchdatabox/redbox-core';
 import type { FormConfigFrame } from '@researchdatabox/sails-ng-common';
+import * as path from 'node:path';
 import { SERVICENOW_CATALOG_CONFIG_MODEL } from './api/configmodels/ServiceNowCatalogAppConfig';
 import type { HookRedboxControllers } from './api/controllers';
 import type { HookRedboxServices } from './api/services';
@@ -26,7 +27,10 @@ const hook = defineRedboxHook({
           );
           return;
         }
-        appConfigService.registerConfigModel({ ...SERVICENOW_CATALOG_CONFIG_MODEL });
+        appConfigService.registerConfigModel({
+          ...SERVICENOW_CATALOG_CONFIG_MODEL,
+          tsGlob: path.join(__dirname, '../src/api/configmodels/*.ts')
+        });
       } catch (error) {
         sails.log.error(
           'sails-hook-redbox-servicenow-catalog: Failed to register the ServiceNow config model:',

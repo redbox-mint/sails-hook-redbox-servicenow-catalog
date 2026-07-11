@@ -56,6 +56,9 @@ describe('ServiceNow catalog hook entrypoint', function () {
       key: 'servicenowCatalog',
       modelName: 'ServiceNowCatalogAppConfig'
     });
+    expect(registered[0].tsGlob).to.equal(
+      require('node:path').join(__dirname, '../../src/api/configmodels/*.ts')
+    );
     expect(new registered[0].class().enabled).to.equal(false);
   });
 
