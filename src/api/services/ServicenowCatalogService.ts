@@ -447,7 +447,7 @@ export namespace Services {
             oid,
             config.responseFields.workspace,
             responseContext,
-            structuredClone(workspaceData)
+            workspaceData
           );
           yield* Effect.tryPromise({
             try: () => RecordsService.updateMeta(brand, oid, updatedWorkspace),

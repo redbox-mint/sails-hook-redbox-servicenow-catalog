@@ -253,6 +253,10 @@ describe('ServiceNow catalog orchestration', function () {
       'metadata.servicenow_number',
       'REQ001234'
     );
+    expect(submittedWorkspace).to.have.nested.property(
+      'metadata.servicenow_number',
+      'REQ001234'
+    );
     expect(updateMeta.mock.calls[0].arguments[2]).to.have.nested.property('metadata.status', 'Draft');
     expect(updateMeta.mock.calls[1].arguments[1]).to.equal('parent-1');
     expect(updateMeta.mock.calls[1].arguments[2]).to.deep.equal({
