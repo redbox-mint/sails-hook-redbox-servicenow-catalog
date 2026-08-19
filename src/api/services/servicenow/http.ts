@@ -1,9 +1,10 @@
 import axios, { type AxiosResponse } from 'axios';
 import { Context, Duration, Effect, Layer, Ref, Schedule } from 'effect';
 import type {
-  ServiceNowCatalogConfigData,
+  ServiceNowCatalogDefinition,
   ServiceNowOAuthConfig
 } from '../../configmodels/ServiceNowCatalogAppConfig';
+import { normalizeServiceNowResponse } from './normalizeResponse';
 import { ServiceNowAuditAction, withIntegrationAudit } from './audit';
 import type { SubmitRunContext } from './context';
 import { CatalogRequestError, CatalogTimeoutError, OAuthTokenError, causeMessage } from './errors';
@@ -55,7 +56,7 @@ function oauthRequestParams(oid: string, oauth: ServiceNowOAuthConfig): Effect.E
 }
 
 function fetchOAuthToken(
-  config: ServiceNowCatalogConfigData,
+  config: ServiceNowCatalogDefinition,
   runContext: SubmitRunContext
 ): Effect.Effect<string, OAuthTokenError | CatalogTimeoutError> {
   const { oid } = runContext;
@@ -120,7 +121,7 @@ function isRetryable(error: ServiceNowClientError): boolean {
   return error._tag === 'CatalogTimeoutError' && error.phase === 'request';
 }
 
-function retryPolicy(config: ServiceNowCatalogConfigData) {
+function retryPolicy(config: ServiceNowCatalogDefinition) {
   const retry = config.connection.retry;
   // Exponential backoff capped at maxDelayMs (union takes the smaller delay),
   // jittered to avoid thundering herds, bounded by maxAttempts - 1 retries.
@@ -132,7 +133,7 @@ function retryPolicy(config: ServiceNowCatalogConfigData) {
 }
 
 export function makeLiveClient(
-  config: ServiceNowCatalogConfigData,
+  config: ServiceNowCatalogDefinition,
   runContext: SubmitRunContext
 ): ServiceNowClient {
   const { oid } = runContext;
@@ -167,7 +168,10 @@ export function makeLiveClient(
           retryable: retryStatusCodes.includes(response.status)
         })
       ),
-      Effect.map(response => ({ statusCode: response.status, data: response.data })),
+      Effect.map(response => ({
+        statusCode: response.status,
+        data: normalizeServiceNowResponse(response.data, config)
+      })),
       Effect.timeoutFail({
         duration: Duration.millis(config.connection.timeoutMs),
         onTimeout: () => new CatalogTimeoutError({ oid, timeoutMs: config.connection.timeoutMs, phase: 'request' })
@@ -205,7 +209,7 @@ export function makeLiveClient(
 }
 
 export function makeClientLayer(
-  config: ServiceNowCatalogConfigData,
+  config: ServiceNowCatalogDefinition,
   runContext: SubmitRunContext
 ): Layer.Layer<ServiceNowClient> {
   return Layer.succeed(ServiceNowClientTag, makeLiveClient(config, runContext));

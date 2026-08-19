@@ -1,30 +1,30 @@
 {
   "name": "@researchdatabox/sails-hook-redbox-servicenow-catalog",
   "version": "1.0.0",
-  "description": "ReDBox workspace provisioner for creating ServiceNow catalog items.",
+  "description": "Reusable ReDBox integration service for submitting named ServiceNow catalog items.",
   "main": "dist/index.js",
   "files": [
     "dist",
-    "assets",
-    "bootstrap-data",
     "language-defaults",
-    "views",
     "README.md"
   ],
   "sails": {
     "isHook": true,
     "hasControllers": true,
     "hasServices": true,
-    "hasConfig": true,
-    "hasFormConfigs": true
+    "hasModels": true,
+    "hasConfig": true
   },
   "scripts": {
-    "compile": "node ./node_modules/@researchdatabox/redbox-dev-tools/bin/run-hook-tsc.js -p tsconfig.json",
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "compile": "npm run clean && node ./node_modules/@researchdatabox/redbox-dev-tools/bin/run-hook-tsc.js -p tsconfig.json",
     "prepack": "npm run compile",
-    "test": "npm run test:unit && npm run test:integration:mocha",
-    "test:unit": "TS_NODE_PROJECT=./test/tsconfig.json npm run compile && node ./node_modules/@researchdatabox/redbox-dev-tools/bin/run-hook-mocha.js --config ./test/unit/.mocharc.cjs ./test/unit",
-    "test:integration:mocha": "npm run compile &&docker compose -f ./support/integration-testing/docker-compose.mocha.yml up --build --menu=false --abort-on-container-exit --exit-code-from redboxportal",
+    "test": "npm run test:unit && npm run test:integration:mocha && npm run test:integration:bruno",
+    "test:unit": "npm run compile && TS_NODE_PROJECT=./test/tsconfig.json node ./node_modules/@researchdatabox/redbox-dev-tools/bin/run-hook-mocha.js --config ./test/unit/.mocharc.cjs ./test/unit",
+    "test:integration:mocha": "npm run compile && docker compose -f ./support/integration-testing/docker-compose.mocha.yml up --build --menu=false --abort-on-container-exit --exit-code-from redboxportal",
     "test:integration:mocha:clean": "docker compose -f ./support/integration-testing/docker-compose.mocha.yml down -v --remove-orphans --timeout 180",
+    "test:integration:bruno": "npm run compile && docker compose -f ./support/integration-testing/docker-compose.bruno.yml up --build --menu=false --abort-on-container-exit --exit-code-from bruno",
+    "test:integration:bruno:clean": "docker compose -f ./support/integration-testing/docker-compose.bruno.yml down -v --remove-orphans --timeout 180",
     "dev:run": "docker compose -f ./support/development/docker-compose.yml up --menu=false --abort-on-container-exit --exit-code-from rbportal",
     "dev:run:build": "docker compose -f ./support/development/docker-compose.yml build",
     "dev:run:clean": "docker compose -f ./support/development/docker-compose.yml down -v --remove-orphans --timeout 180",

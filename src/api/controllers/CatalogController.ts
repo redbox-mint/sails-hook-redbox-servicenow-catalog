@@ -1,6 +1,6 @@
 import { Controllers as CoreControllers } from '@researchdatabox/redbox-core';
 import axios from 'axios';
-import { firstValueFrom, type Observable } from 'rxjs';
+import { firstValueFrom } from 'rxjs';
 
 interface CatalogItemConfig {
   name: string;
@@ -35,29 +35,6 @@ interface CatalogRequestInfo {
   workspaceDescription?: string;
 }
 
-interface WorkspaceServiceContract {
-  createWorkspaceRecord(
-    config: { brandingAndPortalUrl: string; redboxHeaders: Record<string, string> },
-    username: string,
-    project: Record<string, unknown>,
-    recordType: string,
-    workflowStage: string
-  ): Observable<{ data: unknown }>;
-  addWorkspaceToRecord(targetRecordOid: string, workspaceOid: string): Promise<unknown>;
-}
-
-interface RecordsServiceContract {
-  getMeta(oid: string): Promise<Record<string, unknown>>;
-}
-
-interface BrandingServiceContract {
-  getFullPath(req: Sails.Req): string;
-}
-
-declare const WorkspaceService: WorkspaceServiceContract;
-declare const RecordsService: RecordsServiceContract;
-declare const BrandingService: BrandingServiceContract;
-
 function asRecord(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null ? value as Record<string, unknown> : {};
 }
@@ -77,23 +54,23 @@ export namespace Controllers {
 
     public info(req: Sails.Req, res: Sails.Res): unknown {
       BrandingService.getFullPath(req);
-      return this.ajaxOk(req, res, '', { status: true });
+      return this.legacyResponse(req, res, '', { status: true });
     }
 
     public async rdmpInfo(req: Sails.Req, res: Sails.Res): Promise<unknown> {
       try {
         const rdmp = String(req.param('rdmp') ?? '');
         if (!rdmp) {
-          return this.ajaxFail(req, res, 'A plan identifier is required.', { status: false });
+          return this.legacyResponse(req, res, 'A plan identifier is required.', { status: false });
         }
 
         const record = await RecordsService.getMeta(rdmp);
         const recordMetadata = asRecord(record.metadata ?? record);
-        return this.ajaxOk(req, res, '', { status: true, recordMetadata });
+        return this.legacyResponse(req, res, '', { status: true, recordMetadata });
       } catch (error) {
         const message = errorMessage(error);
         this.logger.error(`Unable to load ServiceNow catalog parent plan: ${message}`);
-        return this.ajaxFail(req, res, message, { status: false, message });
+        return this.legacyResponse(req, res, message, { status: false, message });
       }
     }
 
@@ -110,21 +87,29 @@ export namespace Controllers {
         const workspaceType = String(req.param('workspaceType') ?? '');
 
         if (!domain || !config.user || !config.password) {
-          return this.ajaxFail(req, res, 'ServiceNow credentials are not configured.', { status: false });
+          return this.legacyResponse(req, res, 'ServiceNow credentials are not configured.', { status: false });
+        }
+        if (!String(config.recordType ?? '').trim() || !String(config.workflowStage ?? '').trim()) {
+          return this.legacyResponse(
+            req,
+            res,
+            'The legacy ServiceNow catalog record type and workflow stage are not configured.',
+            { status: false }
+          );
         }
         if (!rdmp || !username) {
-          return this.ajaxFail(req, res, 'A plan and authenticated user are required.', { status: false });
+          return this.legacyResponse(req, res, 'A plan and authenticated user are required.', { status: false });
         }
 
         const catalogItem = config.items?.find(item => item.name === catalogName);
         if (!catalogItem) {
-          return this.ajaxFail(req, res, 'No matching ServiceNow catalog item was found.', { status: false });
+          return this.legacyResponse(req, res, 'No matching ServiceNow catalog item was found.', { status: false });
         }
 
         const requestedByEmail = this.fieldValue(request.data_manager);
         const affectedContact = this.fieldValue(request.data_supervisor);
         if (!requestedByEmail || !affectedContact) {
-          return this.ajaxFail(
+          return this.legacyResponse(
             req,
             res,
             'The plan must include both a data manager and supervisor.',
@@ -172,8 +157,8 @@ export namespace Controllers {
 
         const parentRecord = await RecordsService.getMeta(rdmp);
         const parentMetadata = asRecord(parentRecord.metadata ?? parentRecord);
-        const recordType = String(config.recordType ?? 'servicenow-catalog');
-        const workflowStage = String(config.workflowStage ?? 'servicenow-catalog-draft');
+        const recordType = String(config.recordType);
+        const workflowStage = String(config.workflowStage);
         const project = {
           rdmpOid: rdmp,
           rdmpTitle: String(parentMetadata.title ?? ''),
@@ -201,7 +186,7 @@ export namespace Controllers {
         }
         await WorkspaceService.addWorkspaceToRecord(rdmp, workspaceOid);
 
-        return this.ajaxOk(req, res, '', {
+        return this.legacyResponse(req, res, '', {
           status: true,
           createTicket: serviceNowResult,
           request_number: requestNumber,
@@ -211,7 +196,7 @@ export namespace Controllers {
       } catch (error) {
         const message = errorMessage(error);
         this.logger.error(`Unable to submit ServiceNow catalog request: ${message}`);
-        return this.ajaxFail(
+        return this.legacyResponse(
           req,
           res,
           message,
@@ -221,6 +206,19 @@ export namespace Controllers {
           }
         );
       }
+    }
+
+    /** Preserve the legacy payload contract while using the standard response pipeline. */
+    private legacyResponse(
+      req: Sails.Req,
+      res: Sails.Res,
+      _message: string,
+      data: unknown
+    ): unknown {
+      return this.sendResp(req, res, {
+        data,
+        headers: this.getNoCacheHeaders()
+      });
     }
 
     public requestToVariables(request: Record<string, CatalogRequestField>): Record<string, unknown> {
@@ -301,7 +299,10 @@ export namespace Controllers {
   }
 }
 
-export type CatalogController = ReturnType<Controllers.Catalog['exports']>;
-export const CatalogController: CatalogController = new Controllers.Catalog().exports();
+export type CatalogController = Pick<
+  Controllers.Catalog,
+  'info' | 'rdmpInfo' | 'request' | 'requestToVariables'
+>;
+export const CatalogController = new Controllers.Catalog().exports() as CatalogController;
 
 module.exports = CatalogController;

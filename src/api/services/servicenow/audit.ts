@@ -15,10 +15,13 @@ export const SERVICENOW_INTEGRATION_NAME = 'servicenow-catalog' as const;
 
 export const ServiceNowAuditAction = {
   submitCatalogRequest: 'submitCatalogRequest',
+  idempotencyDecision: 'idempotencyDecision',
+  parentLookup: 'parentLookup',
   associateWorkspace: 'associateWorkspace',
   catalogOrderRequest: 'catalogOrderRequest',
   oauthTokenRequest: 'oauthTokenRequest',
-  workspaceMetadataUpdate: 'workspaceMetadataUpdate'
+  workspaceMetadataUpdate: 'workspaceMetadataUpdate',
+  parentMetadataUpdate: 'parentMetadataUpdate'
 } as const;
 
 export type ServiceNowAuditAction = (typeof ServiceNowAuditAction)[keyof typeof ServiceNowAuditAction];
@@ -50,6 +53,12 @@ type IntegrationAuditServiceShape = {
   completeAudit: (ctx: IntegrationAuditContext | null | undefined, result?: Record<string, unknown>) => void;
   failAudit: (ctx: IntegrationAuditContext | null | undefined, error: unknown, details?: Record<string, unknown>) => void;
   registerOutcomeMapper?: (integrationName: string, mapper: IntegrationOutcomeMapper) => void;
+  getAuditLog?: (params: {
+    oid: string;
+    integrationName?: string;
+    page?: number;
+    pageSize?: number;
+  }) => Promise<{ rows: Record<string, unknown>[]; total: number }>;
 };
 
 export function getAuditService(): IntegrationAuditServiceShape | undefined {
@@ -203,7 +212,8 @@ export function withIntegrationAudit<A, E, R>(
               completeCatalogAudit(ctx, safeAuditDetails(options.onSuccess, exit.value));
             } else if (Exit.isInterrupted(exit)) {
               failCatalogAudit(ctx, 'interrupted', {
-                message: `ServiceNow catalog step '${action}' was interrupted before completion.`
+                message: `ServiceNow catalog step '${action}' was interrupted before completion.`,
+                requestSummary: { submissionCertainty: 'uncertain' }
               });
             } else {
               const error = Cause.squash(exit.cause);
@@ -213,4 +223,89 @@ export function withIntegrationAudit<A, E, R>(
         )
       );
     });
+}
+
+
+export type CatalogIdempotencyDecision = 'clear' | 'completed' | 'in-progress';
+
+function rowSummary(row: Record<string, unknown>): Record<string, unknown> {
+  const value = row.requestSummary;
+  return value != null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+/**
+ * Consults the persistent core audit log. Failed traces are retryable; a
+ * successful trace is a duplicate, while a started trace without a terminal
+ * entry is treated as uncertain because ServiceNow may already have accepted it.
+ */
+export async function getCatalogIdempotencyDecision(
+  oid: string,
+  catalog: string,
+  idempotencyKey: string
+): Promise<CatalogIdempotencyDecision> {
+  const service = getAuditService();
+  if (service?.getAuditLog == null) {
+    throw new Error('IntegrationAuditService does not expose persistent audit lookup.');
+  }
+
+  const rows: Record<string, unknown>[] = [];
+  const pageSize = 500;
+  let page = 1;
+  let total = 0;
+  do {
+    const result = await service.getAuditLog({
+      oid,
+      integrationName: SERVICENOW_INTEGRATION_NAME,
+      page,
+      pageSize
+    });
+    rows.push(...result.rows);
+    total = result.total;
+    page += 1;
+  } while (rows.length < total);
+
+  const matching = rows.filter(row => {
+    if (
+      row.integrationName !== SERVICENOW_INTEGRATION_NAME
+      || row.integrationAction !== ServiceNowAuditAction.submitCatalogRequest
+    ) {
+      return false;
+    }
+    const summary = rowSummary(row);
+    return summary.catalog === catalog && summary.idempotencyKey === idempotencyKey;
+  });
+  if (matching.length === 0) {
+    return 'clear';
+  }
+
+  const statusesBySpan = new Map<string, Set<string>>();
+  const uncertainSpans = new Set<string>();
+  matching.forEach((row, index) => {
+    const spanIdentity = String(row.spanId ?? row.traceId ?? 'audit-row-' + index);
+    const statuses = statusesBySpan.get(spanIdentity) ?? new Set<string>();
+    statuses.add(String(row.status ?? ''));
+    statusesBySpan.set(spanIdentity, statuses);
+    if (rowSummary(row).submissionCertainty === 'uncertain') {
+      uncertainSpans.add(spanIdentity);
+    }
+  });
+
+  for (const statuses of statusesBySpan.values()) {
+    if (statuses.has('success')) {
+      return 'completed';
+    }
+  }
+  for (const spanIdentity of uncertainSpans) {
+    if (statusesBySpan.get(spanIdentity)?.has('failed')) {
+      return 'in-progress';
+    }
+  }
+  for (const statuses of statusesBySpan.values()) {
+    if (statuses.has('started') && !statuses.has('failed')) {
+      return 'in-progress';
+    }
+  }
+  return 'clear';
 }

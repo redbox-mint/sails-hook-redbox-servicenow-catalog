@@ -1,15 +1,12 @@
 import '@researchdatabox/redbox-core';
 import { defineRedboxHook, type HookRegistrationMap } from '@researchdatabox/redbox-core';
-import type { FormConfigFrame } from '@researchdatabox/sails-ng-common';
 import * as path from 'node:path';
+import { ModelExports } from './api/models';
 import { SERVICENOW_CATALOG_CONFIG_MODEL } from './api/configmodels/ServiceNowCatalogAppConfig';
 import type { HookRedboxControllers } from './api/controllers';
 import type { HookRedboxServices } from './api/services';
 import { auth } from './config/auth';
-import { recordtypes } from './config/recordtypes';
 import { servicenowCatalog } from './config/servicenow';
-import { workflows } from './config/workflows';
-import { workspacetypes } from './config/workspacetypes';
 
 export {};
 
@@ -71,10 +68,7 @@ const hook = defineRedboxHook({
   registerRedboxConfig(): HookRegistrationMap {
     return {
       auth,
-      recordtype: recordtypes,
-      servicenowCatalog,
-      workflow: workflows,
-      workspacetype: workspacetypes
+      servicenowCatalog
     };
   },
   registerRedboxControllers(): HookRedboxControllers {
@@ -83,13 +77,10 @@ const hook = defineRedboxHook({
   registerRedboxServices(): HookRedboxServices {
     return require('./api/services').ServiceExports as HookRedboxServices;
   },
-  registerRedboxFormConfigs(): Record<string, FormConfigFrame> {
-    return require('./form-config').FormConfigExports as Record<string, FormConfigFrame>;
-  },
   additionalExports: {
+    registerRedboxModels: () => ModelExports,
     ControllerExports: require('./api/controllers').ControllerExports,
-    ServiceExports: require('./api/services').ServiceExports,
-    FormConfigExports: require('./form-config').FormConfigExports
+    ServiceExports: require('./api/services').ServiceExports
   }
 });
 

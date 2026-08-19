@@ -1,59 +1,131 @@
-const fs = require('node:fs');
-const path = require('node:path');
-const { expect } = require('@researchdatabox/redbox-dev-tools/testing');
-const { clearHookTestGlobals, installHookTestGlobals } = require('../support/globals');
+import type {
+  ServiceNowCatalogDefinition,
+  ServiceNowFieldMapping
+} from '../../src/api/configmodels/ServiceNowCatalogAppConfig';
 
-describe('migrated ServiceNow configuration', function () {
-  let hookModule;
+const { expect } = require('@researchdatabox/redbox-dev-tools/testing') as { expect: Chai.ExpectStatic };
+const configModule = require('../../dist/api/configmodels/ServiceNowCatalogAppConfig.js') as
+  typeof import('../../src/api/configmodels/ServiceNowCatalogAppConfig');
+const configurationModule = require('../../dist/api/services/servicenow/configuration.js') as
+  typeof import('../../src/api/services/servicenow/configuration');
 
-  beforeEach(() => {
-    installHookTestGlobals();
-    hookModule = require('../../dist/index.js');
+const {
+  SERVICENOW_CATALOG_CONFIG_MODEL,
+  SERVICENOW_CATALOG_SCHEMA,
+  ServiceNowCatalogAppConfig,
+  createDefaultCatalogDefinition
+} = configModule;
+const {
+  normalizeServiceNowCatalogConfig,
+  resolveServiceNowCatalog
+} = configurationModule;
+
+describe('named ServiceNow catalog configuration', function () {
+  it('defaults to a disabled integration with no implicit customer catalog', function () {
+    const config = new ServiceNowCatalogAppConfig();
+    expect(config).to.deep.equal({ enabled: false, catalogs: {} });
+    expect(ServiceNowCatalogAppConfig.getFieldOrder()).to.deep.equal(['enabled', 'catalogs']);
+
+    const definition = createDefaultCatalogDefinition();
+    expect(definition).to.have.nested.property('responseNormalization.parseJsonString', true);
+    expect(definition).to.have.nested.property('idempotency.enabled', false);
+    expect(definition.responseFields).to.deep.equal({ workspace: [], parentRecord: [] });
   });
 
-  afterEach(() => {
-    clearHookTestGlobals();
+  it('validates the canonical named-catalog schema', function () {
+    const rootSchema = SERVICENOW_CATALOG_SCHEMA as {
+      required: string[];
+      properties: { catalogs: { additionalProperties: { required: string[] } } };
+    };
+    expect(rootSchema.required).to.deep.equal(['enabled', 'catalogs']);
+    expect(rootSchema.properties.catalogs.additionalProperties.required).to.include.members([
+      'enabled',
+      'connection',
+      'oauth',
+      'bodyTemplate',
+      'requestFields',
+      'responseFields'
+    ]);
   });
 
-  it('contains only Handlebars runtime templates', function () {
-    const runtimeConfig = JSON.stringify({
-      config: hookModule.registerRedboxConfig(),
-      forms: hookModule.registerRedboxFormConfigs()
-    });
+  it('expands concrete secret paths for named catalogs and keeps temporary legacy paths', function () {
+    const model = {
+      enabled: true,
+      catalogs: {
+        'storage-new': createDefaultCatalogDefinition(),
+        'catalog.with.dot': createDefaultCatalogDefinition()
+      }
+    };
+    const adapted = SERVICENOW_CATALOG_CONFIG_MODEL.formAdapter.toForm(model);
 
-    expect(runtimeConfig).not.to.include('<%');
-    expect(runtimeConfig).not.to.include('%>');
-    expect(runtimeConfig).not.to.include('${');
-    expect(runtimeConfig).not.to.include('Not yet implemented in v5');
+    expect(adapted).to.equal(model);
+    expect(SERVICENOW_CATALOG_CONFIG_MODEL.secretFields).to.include.members([
+      'catalogs["storage-new"].connection.headers.Authorization',
+      'catalogs["storage-new"].oauth.clientSecret',
+      'catalogs["storage-new"].oauth.password',
+      'catalogs["storage-new"].oauth.refreshToken',
+      'catalogs["catalog.with.dot"].oauth.clientSecret',
+      'oauth.clientSecret'
+    ]);
+
+    const beforeSave = SERVICENOW_CATALOG_CONFIG_MODEL.secretFields.length;
+    SERVICENOW_CATALOG_CONFIG_MODEL.formAdapter.fromForm(model);
+    expect(SERVICENOW_CATALOG_CONFIG_MODEL.secretFields).to.have.length(beforeSave);
   });
 
-  it('backs every hook form vocabulary with production bootstrap data', function () {
-    const forms = hookModule.registerRedboxFormConfigs();
-    const vocabRefs = new Set();
+  it('normalizes a temporary single-catalog config under the default name with a warning', function () {
+    const warnings: string[] = [];
+    const legacy = createDefaultCatalogDefinition();
+    legacy.connection.url = 'https://legacy.example/catalog';
+    const responseFields: ServiceNowFieldMapping[] = [{
+      destination: 'metadata.number',
+      source: { kind: 'path', path: 'result.number' }
+    }];
+    const result = normalizeServiceNowCatalogConfig(
+      {
+        enabled: true,
+        connection: legacy.connection,
+        oauth: legacy.oauth,
+        bodyTemplate: legacy.bodyTemplate,
+        requestFields: legacy.requestFields,
+        responseFields
+      },
+      (message: string) => warnings.push(message)
+    );
 
-    for (const form of Object.values(forms)) {
-      for (const definition of form.componentDefinitions) {
-        const config = definition.component?.config;
-        if (config?.vocabRef) {
-          vocabRefs.add(config.vocabRef);
-          expect(config.inlineVocab).to.equal(true);
-          expect(config.options).to.deep.equal([]);
+    expect(result.usedLegacyShape).to.equal(true);
+    const normalizedDefault = result.config.catalogs.default as ServiceNowCatalogDefinition;
+    expect(normalizedDefault).to.have.nested.property(
+      'responseFields.workspace[0].destination',
+      'metadata.number'
+    );
+    expect(warnings).to.have.length(1);
+    expect(warnings[0]).to.contain('deprecated');
+  });
+
+  it('resolves brand catalog values over hook defaults', function () {
+    const hookCatalog = createDefaultCatalogDefinition();
+    hookCatalog.connection.url = 'https://hook.example/catalog';
+    hookCatalog.connection.timeoutMs = 1000;
+    const resolved = resolveServiceNowCatalog(
+      'storage-new',
+      { enabled: true, catalogs: { 'storage-new': hookCatalog } },
+      {
+        catalogs: {
+          'storage-new': {
+            connection: { url: 'https://brand.example/catalog' },
+            requestFields: [{
+              destination: 'variables.title',
+              source: { kind: 'path', path: 'workspace.metadata.title' }
+            }]
+          }
         }
       }
-    }
+    );
 
-    expect([...vocabRefs].sort()).to.deep.equal([
-      'servicenow-catalog-storage-sizes',
-      'servicenow-catalog-storage-types'
-    ]);
-    for (const vocabRef of vocabRefs) {
-      const vocabPath = path.resolve(
-        __dirname,
-        '../../bootstrap-data/vocabularies',
-        `${vocabRef}.json`
-      );
-      expect(fs.existsSync(vocabPath), vocabPath).to.equal(true);
-      expect(JSON.parse(fs.readFileSync(vocabPath, 'utf8')).slug).to.equal(vocabRef);
-    }
+    expect(resolved.enabled).to.equal(true);
+    expect(resolved.catalog?.connection.url).to.equal('https://brand.example/catalog');
+    expect(resolved.catalog?.connection.timeoutMs).to.equal(1000);
+    expect(resolved.catalog?.requestFields).to.have.length(1);
   });
 });

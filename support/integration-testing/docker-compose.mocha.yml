@@ -20,18 +20,12 @@ x-rbportal-depends: &rbportal-depends
 services:
   redboxportal:
     build:
-      context: ../../..
-      dockerfile: sails-hook-redbox-servicenow-catalog/Dockerfile
+      context: ../..
+      dockerfile: Dockerfile
       target: sails-hook-redbox-servicenow-catalog
     volumes:
-      - "./run-mocha-hook.sh:/tmp/run-mocha-hook.sh:ro"
-      - "../../../redbox-portal/test:/opt/redbox-portal/test"
-      - "../../../redbox-portal/support/integration-testing:/opt/redbox-portal/support/integration-testing"
-      - "../../../redbox-portal/tsconfig.json:/opt/redbox-portal/tsconfig.json"
+      - "../../support/integration-testing:/opt/redbox-portal/support/integration-testing:ro"
       - "../../test/integration:/opt/redbox-portal/test/integration/sails-hook-redbox-servicenow-catalog"
-      - "../../../redbox-portal/packages/redbox-core:/opt/redbox-portal/packages/redbox-core"
-      - "../../../redbox-portal/packages/redbox-dev-tools:/opt/redbox-portal/packages/redbox-dev-tools"
-      - "../../../redbox-portal/packages/sails-ng-common:/opt/redbox-portal/packages/sails-ng-common"
     depends_on: *rbportal-depends
     expose:
       - "1500"
@@ -43,7 +37,7 @@ services:
     init: true
     entrypoint:
       - bash
-      - /tmp/run-mocha-hook.sh
+      - /opt/redbox-portal/support/integration-testing/run-mocha-hook.sh
 
   mongodb:
     image: mongo:7

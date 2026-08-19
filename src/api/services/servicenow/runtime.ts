@@ -1,5 +1,5 @@
 import { Layer, Logger, LogLevel } from 'effect';
-import type { ServiceNowCatalogConfigData } from '../../configmodels/ServiceNowCatalogAppConfig';
+import type { ServiceNowCatalogDefinition } from '../../configmodels/ServiceNowCatalogAppConfig';
 import { ServiceNowConfigTag, SubmitRunContextTag, type SubmitRunContext } from './context';
 import { makeClientLayer, type ServiceNowClient } from './http';
 
@@ -39,10 +39,10 @@ const sailsLogger = Logger.make(({ logLevel, message, annotations }) => {
 
 export const sailsLoggerLayer = Logger.replace(Logger.defaultLogger, sailsLogger);
 
-export type ServiceNowRuntimeServices = ServiceNowCatalogConfigData | SubmitRunContext | ServiceNowClient;
+export type ServiceNowRuntimeServices = ServiceNowCatalogDefinition | SubmitRunContext | ServiceNowClient;
 
 export function makeRuntimeLayer(
-  config: ServiceNowCatalogConfigData,
+  config: ServiceNowCatalogDefinition,
   runContext: SubmitRunContext
 ): Layer.Layer<ServiceNowRuntimeServices> {
   return Layer.mergeAll(

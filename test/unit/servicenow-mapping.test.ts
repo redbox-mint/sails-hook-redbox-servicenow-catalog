@@ -1,14 +1,10 @@
-const { Cause, Effect, Exit } = require('effect');
-const { expect } = require('@researchdatabox/redbox-dev-tools/testing');
+const { Cause, Effect, Exit } = require('effect') as typeof import('effect');
+const { expect } = require('@researchdatabox/redbox-dev-tools/testing') as { expect: Chai.ExpectStatic };
+const { applyFieldMappings } = require('../../dist/api/services/servicenow/mapping.js') as
+  typeof import('../../src/api/services/servicenow/mapping');
 
 describe('ServiceNow value-binding mappings', function () {
-  let applyFieldMappings;
-
-  beforeEach(() => {
-    ({ applyFieldMappings } = require('../../dist/api/services/servicenow/mapping.js'));
-  });
-
-  it('evaluates path, Handlebars, JSONata, defaults, and parsed JSON bindings', async function () {
+  it('evaluates the stable workspace, parent, trigger, brand, translation, and date context', async function () {
     const target = { variables: {} };
     const result = await Effect.runPromise(applyFieldMappings(
       'workspace-1',
@@ -19,11 +15,25 @@ describe('ServiceNow value-binding mappings', function () {
         },
         {
           destination: 'variables.summary',
-          source: { kind: 'handlebars', template: '{{workspace.metadata.title}} — {{rdmp.metadata.title}}' }
+          source: {
+            kind: 'handlebars',
+            template: '{{workspace.metadata.title}} — {{parentRecord.metadata.title}} — {{trigger.event}}/{{trigger.catalog}}'
+          }
         },
         {
-          destination: 'variables.uppercaseTitle',
-          source: { kind: 'jsonata', expression: '$uppercase(workspace.metadata.title)' }
+          destination: 'variables.brand',
+          source: { kind: 'path', path: 'brand' }
+        },
+        {
+          destination: 'variables.translation',
+          source: { kind: 'handlebars', template: '{{t "storage.label"}}' }
+        },
+        {
+          destination: 'variables.formattedDate',
+          source: {
+            kind: 'jsonata',
+            expression: '$luxonFormatDate(workspace.metadata.requestedAt, "dd/LL/yyyy")'
+          }
         },
         {
           destination: 'variables.missing',
@@ -36,8 +46,17 @@ describe('ServiceNow value-binding mappings', function () {
         }
       ],
       {
-        workspace: { metadata: { title: 'Research storage' } },
-        rdmp: { metadata: { title: 'Plan A' } },
+        workspace: {
+          metadata: {
+            title: 'Research storage',
+            requestedAt: '2026-08-18'
+          }
+        },
+        parentRecord: { metadata: { title: 'Plan A' } },
+        trigger: { event: 'create', catalog: 'storage-new' },
+        brand: 'brand-a',
+        now: '2026-08-18T00:00:00.000Z',
+        translationService: { t: (key: string) => key === 'storage.label' ? 'Storage' : key },
         encodedLocations: '["Adelaide","Brisbane"]'
       },
       target
@@ -46,17 +65,46 @@ describe('ServiceNow value-binding mappings', function () {
     expect(result).to.deep.equal({
       variables: {
         title: 'Research storage',
-        summary: 'Research storage — Plan A',
-        uppercaseTitle: 'RESEARCH STORAGE',
+        summary: 'Research storage — Plan A — create/storage-new',
+        brand: 'brand-a',
+        translation: 'Storage',
+        formattedDate: '18/08/2026',
         missing: 'fallback',
         locations: ['Adelaide', 'Brisbane']
       }
     });
   });
 
+  it('maps normalized response data and configurable status only when mappings request it', async function () {
+    const workspace = { metadata: { status: 'Draft', existing: 'keep' } };
+    const noStatusResult = await Effect.runPromise(applyFieldMappings(
+      'workspace-2',
+      [{
+        destination: 'metadata.requestNumber',
+        source: { kind: 'path', path: 'response.result.number' }
+      }],
+      { response: { result: { number: 'REQ1', status: 'Accepted' } } },
+      structuredClone(workspace)
+    ));
+    expect(noStatusResult).to.deep.equal({
+      metadata: { status: 'Draft', existing: 'keep', requestNumber: 'REQ1' }
+    });
+
+    const statusResult = await Effect.runPromise(applyFieldMappings(
+      'workspace-2',
+      [{
+        destination: 'metadata.status',
+        source: { kind: 'path', path: 'response.result.status', defaultValue: 'Submitted' }
+      }],
+      { response: { result: { status: 'Accepted' } } },
+      structuredClone(workspace)
+    ));
+    expect(statusResult).to.have.nested.property('metadata.status', 'Accepted');
+  });
+
   it('returns a tagged MappingError for invalid parsed JSON', async function () {
     const exit = await Effect.runPromiseExit(applyFieldMappings(
-      'workspace-2',
+      'workspace-3',
       [{
         destination: 'variables.value',
         source: { kind: 'path', path: 'encoded' },
@@ -67,18 +115,22 @@ describe('ServiceNow value-binding mappings', function () {
     ));
 
     expect(Exit.isFailure(exit)).to.equal(true);
-    const failure = Cause.failureOption(exit.cause);
-    expect(failure._tag).to.equal('Some');
-    expect(failure.value).to.include({
-      _tag: 'MappingError',
-      oid: 'workspace-2',
-      destination: 'variables.value'
-    });
+    if (Exit.isFailure(exit)) {
+      const failure = Cause.failureOption(exit.cause);
+      expect(failure._tag).to.equal('Some');
+      if (failure._tag === 'Some') {
+        expect(failure.value).to.include({
+          _tag: 'MappingError',
+          oid: 'workspace-3',
+          destination: 'variables.value'
+        });
+      }
+    }
   });
 
   it('rejects prototype-polluting destination paths', async function () {
     const exit = await Effect.runPromiseExit(applyFieldMappings(
-      'workspace-3',
+      'workspace-4',
       [{
         destination: '__proto__.polluted',
         source: { kind: 'path', path: 'value' }

@@ -1,6 +1,6 @@
 import type { ValueBinding as CoreValueBinding } from '@researchdatabox/redbox-core';
 
-/** Brand-aware application configuration for the ServiceNow catalog integration. */
+/** Brand-aware application configuration for reusable ServiceNow catalog submissions. */
 
 // Reuse the binding contract exposed by core so ServiceNow mappings stay aligned
 // with the DOI and Figshare configuration editors.
@@ -44,58 +44,90 @@ export interface ServiceNowOAuthConfig {
   refreshToken?: string;
 }
 
-export interface ServiceNowCatalogConfigData {
+export interface ServiceNowCatalogDefinition {
   enabled: boolean;
   connection: ServiceNowConnectionConfig;
   oauth: ServiceNowOAuthConfig;
   /** Static request body the request field mappings are applied over. */
   bodyTemplate: Record<string, unknown>;
-  /** Mappings from the workspace/rdmp context into the outgoing request body. */
+  /** Mappings from the stable submission context into the outgoing request body. */
   requestFields: ServiceNowFieldMapping[];
-  /** Mappings from the ServiceNow response into the workspace metadata. */
-  responseFields: ServiceNowFieldMapping[];
+  /** Response mappings are independently applied to the workspace and optional parent. */
+  responseFields: {
+    workspace: ServiceNowFieldMapping[];
+    parentRecord?: ServiceNowFieldMapping[];
+  };
+  /** When present, the binding resolves the record associated with the submitted workspace. */
+  parentRecord?: {
+    oid: ValueBinding;
+  };
+  responseNormalization?: {
+    /** Parse a JSON-encoded root response string when possible. */
+    parseJsonString: boolean;
+  };
+  idempotency?: {
+    enabled: boolean;
+    /** Used when a trigger does not supply an explicit idempotency key. */
+    key?: ValueBinding;
+  };
+}
+
+export interface ServiceNowCatalogConfigData {
+  enabled: boolean;
+  catalogs: Record<string, ServiceNowCatalogDefinition>;
+}
+
+export const DEFAULT_SERVICENOW_CATALOG_NAME = 'default';
+
+export function createDefaultCatalogDefinition(): ServiceNowCatalogDefinition {
+  return {
+    enabled: true,
+    connection: {
+      url: '',
+      method: 'post',
+      headers: {},
+      timeoutMs: 30000,
+      totalTimeoutMs: 120000,
+      retry: {
+        maxAttempts: 3,
+        baseDelayMs: 1000,
+        maxDelayMs: 10000,
+        retryOnStatusCodes: [408, 429, 500, 502, 503, 504]
+      }
+    },
+    oauth: {
+      enabled: false,
+      url: '',
+      clientId: '',
+      clientSecret: '',
+      grantType: 'client_credentials'
+    },
+    bodyTemplate: {
+      sysparm_quantity: '1',
+      // Required by ServiceNow to avoid the known portal message response issue.
+      get_portal_messages: 'true',
+      variables: {}
+    },
+    requestFields: [],
+    responseFields: {
+      workspace: [],
+      parentRecord: []
+    },
+    responseNormalization: {
+      parseJsonString: true
+    },
+    idempotency: {
+      enabled: false
+    }
+  };
 }
 
 export class ServiceNowCatalogAppConfig implements ServiceNowCatalogConfigData {
   enabled = false;
-  connection: ServiceNowConnectionConfig = {
-    url: '',
-    method: 'post',
-    headers: {},
-    timeoutMs: 30000,
-    totalTimeoutMs: 120000,
-    retry: {
-      maxAttempts: 3,
-      baseDelayMs: 1000,
-      maxDelayMs: 10000,
-      retryOnStatusCodes: [408, 429, 500, 502, 503, 504]
-    }
-  };
-  oauth: ServiceNowOAuthConfig = {
-    enabled: false,
-    url: '',
-    clientId: '',
-    clientSecret: '',
-    grantType: 'client_credentials'
-  };
-  bodyTemplate: Record<string, unknown> = {
-    sysparm_quantity: '1',
-    // Required by ServiceNow to avoid the known portal message response issue.
-    get_portal_messages: 'true',
-    variables: {}
-  };
-  requestFields: ServiceNowFieldMapping[] = [];
-  responseFields: ServiceNowFieldMapping[] = [
-    { source: { kind: 'path', path: 'result.cart_id' }, destination: 'metadata.servicenow_cart_id' },
-    { source: { kind: 'path', path: 'result.number' }, destination: 'metadata.servicenow_number' },
-    { source: { kind: 'path', path: 'result.parent_id' }, destination: 'metadata.servicenow_parent_id' },
-    { source: { kind: 'path', path: 'result.parent_table' }, destination: 'metadata.servicenow_parent_table' },
-    { source: { kind: 'path', path: 'result.sys_id' }, destination: 'metadata.servicenow_sys_id' },
-    { source: { kind: 'path', path: 'result.table' }, destination: 'metadata.servicenow_table' }
-  ];
+  catalogs: Record<string, ServiceNowCatalogDefinition> = {};
 
   public static getFieldOrder(): string[] {
-    return ['enabled', 'connection', 'oauth', 'bodyTemplate', 'requestFields', 'responseFields'];
+    return ['enabled', 'catalogs'];
   }
 }
 
@@ -137,10 +169,17 @@ const FIELD_MAPPING_SCHEMA = {
   required: ['destination', 'source']
 };
 
-export const SERVICENOW_CATALOG_SCHEMA = {
+const FIELD_MAPPINGS_SCHEMA = {
+  type: 'array',
+  items: FIELD_MAPPING_SCHEMA,
+  default: []
+};
+
+const CATALOG_DEFINITION_SCHEMA = {
   type: 'object',
+  title: 'Catalog definition',
   properties: {
-    enabled: { type: 'boolean', title: 'Enabled', default: false },
+    enabled: { type: 'boolean', title: 'Enabled', default: true },
     connection: {
       type: 'object',
       title: 'Connection',
@@ -173,7 +212,8 @@ export const SERVICENOW_CATALOG_SCHEMA = {
               items: { type: 'number' },
               default: [408, 429, 500, 502, 503, 504]
             }
-          }
+          },
+          required: ['maxAttempts', 'baseDelayMs', 'maxDelayMs', 'retryOnStatusCodes']
         }
       },
       required: ['url', 'method', 'headers', 'timeoutMs', 'totalTimeoutMs', 'retry']
@@ -200,23 +240,105 @@ export const SERVICENOW_CATALOG_SCHEMA = {
       required: ['enabled', 'url', 'clientId', 'clientSecret', 'grantType']
     },
     bodyTemplate: { type: 'object', title: 'Request body template', default: {} },
-    requestFields: {
-      type: 'array',
-      title: 'Request field mappings',
-      items: FIELD_MAPPING_SCHEMA,
-      default: []
-    },
+    requestFields: { ...FIELD_MAPPINGS_SCHEMA, title: 'Request field mappings' },
     responseFields: {
-      type: 'array',
+      type: 'object',
       title: 'Response field mappings',
-      items: FIELD_MAPPING_SCHEMA,
-      default: []
+      properties: {
+        workspace: { ...FIELD_MAPPINGS_SCHEMA, title: 'Workspace mappings' },
+        parentRecord: { ...FIELD_MAPPINGS_SCHEMA, title: 'Parent record mappings' }
+      },
+      required: ['workspace']
+    },
+    parentRecord: {
+      type: 'object',
+      title: 'Parent record',
+      properties: {
+        oid: VALUE_BINDING_SCHEMA
+      },
+      required: ['oid']
+    },
+    responseNormalization: {
+      type: 'object',
+      title: 'Response normalization',
+      properties: {
+        parseJsonString: {
+          type: 'boolean',
+          title: 'Parse a JSON-encoded root string',
+          default: true
+        }
+      },
+      required: ['parseJsonString']
+    },
+    idempotency: {
+      type: 'object',
+      title: 'Idempotency',
+      properties: {
+        enabled: { type: 'boolean', title: 'Enabled', default: false },
+        key: VALUE_BINDING_SCHEMA
+      },
+      required: ['enabled']
     }
   },
   required: ['enabled', 'connection', 'oauth', 'bodyTemplate', 'requestFields', 'responseFields']
 };
 
+export const SERVICENOW_CATALOG_SCHEMA = {
+  type: 'object',
+  title: 'ServiceNow Catalog',
+  properties: {
+    enabled: { type: 'boolean', title: 'Enabled', default: false },
+    catalogs: {
+      type: 'object',
+      title: 'Named catalogs',
+      additionalProperties: CATALOG_DEFINITION_SCHEMA,
+      default: {}
+    }
+  },
+  required: ['enabled', 'catalogs']
+};
+
 export const SERVICENOW_CATALOG_CONFIG_KEY = 'servicenowCatalog';
+
+const NAMED_CATALOG_SECRET_SUFFIXES = [
+  'connection.headers.Authorization',
+  'oauth.clientSecret',
+  'oauth.password',
+  'oauth.refreshToken'
+] as const;
+
+/**
+ * AppConfigService currently resolves lodash paths literally and does not
+ * expand wildcard map keys. Keep one mutable path list and let its form adapter
+ * add concrete, safely quoted catalog paths before core masks or merges them.
+ */
+export const SERVICENOW_CATALOG_SECRET_FIELDS = [
+  'connection.headers.Authorization',
+  'oauth.clientSecret',
+  'oauth.password',
+  'oauth.refreshToken'
+];
+
+export function registerServiceNowCatalogSecretFields(model: unknown): unknown {
+  if (model == null || typeof model !== 'object' || Array.isArray(model)) {
+    return model;
+  }
+  const catalogs = Reflect.get(model, 'catalogs');
+  if (catalogs == null || typeof catalogs !== 'object' || Array.isArray(catalogs)) {
+    return model;
+  }
+
+  for (const catalogName of Object.keys(catalogs)) {
+    const catalogPath = 'catalogs[' + JSON.stringify(catalogName) + ']';
+    for (const suffix of NAMED_CATALOG_SECRET_SUFFIXES) {
+      const fieldPath = catalogPath + '.' + suffix;
+      if (!SERVICENOW_CATALOG_SECRET_FIELDS.includes(fieldPath)) {
+        SERVICENOW_CATALOG_SECRET_FIELDS.push(fieldPath);
+      }
+    }
+  }
+  return model;
+}
 
 export const SERVICENOW_CATALOG_CONFIG_MODEL = {
   key: SERVICENOW_CATALOG_CONFIG_KEY,
@@ -224,10 +346,9 @@ export const SERVICENOW_CATALOG_CONFIG_MODEL = {
   title: 'ServiceNow Catalog',
   class: ServiceNowCatalogAppConfig,
   schema: SERVICENOW_CATALOG_SCHEMA,
-  secretFields: [
-    'connection.headers.Authorization',
-    'oauth.clientSecret',
-    'oauth.password',
-    'oauth.refreshToken'
-  ]
+  secretFields: SERVICENOW_CATALOG_SECRET_FIELDS,
+  formAdapter: {
+    toForm: registerServiceNowCatalogSecretFields,
+    fromForm: registerServiceNowCatalogSecretFields
+  }
 };

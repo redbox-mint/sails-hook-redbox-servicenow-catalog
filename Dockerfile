@@ -1,31 +1,27 @@
-ARG REDBOX_BASE_IMAGE=qcifengineering/redbox-portal:develop-pdfgen
+ARG REDBOX_PORTAL_IMAGE=qcifengineering/redbox-portal:develop
 
-FROM ${REDBOX_BASE_IMAGE} AS builder
+FROM ${REDBOX_PORTAL_IMAGE} AS builder
 
 USER root
 
-COPY sails-hook-redbox-servicenow-catalog /opt/sails-hook-redbox-servicenow-catalog
-COPY redbox-portal/packages/redbox-core /opt/redbox-portal/packages/redbox-core
-COPY redbox-portal/packages/sails-ng-common /opt/redbox-portal/packages/sails-ng-common
-COPY redbox-portal/packages/redbox-dev-tools /opt/redbox-portal/packages/redbox-dev-tools
-COPY redbox-portal/packages/redbox-hook-dev /opt/redbox-portal/packages/redbox-hook-dev
+COPY . /opt/sails-hook-redbox-servicenow-catalog
 
 RUN --mount=type=cache,target=/root/.npm \
   cd /opt/sails-hook-redbox-servicenow-catalog \
-  && npm install --include=dev --ignore-scripts --legacy-peer-deps \
+  && npm install --include=dev --ignore-scripts --strict-peer-deps \
   && npm run compile \
-  && HOOK_TARBALL="$(npm pack --pack-destination /tmp --silent)" \
-  && cd /opt/redbox-portal \
-  && npm install --legacy-peer-deps --ignore-scripts "/tmp/${HOOK_TARBALL}" \
-  && if [ -d /opt/redbox-portal/packages/redbox-hook-dev ]; then ln -sfn /opt/redbox-portal/packages/redbox-hook-dev /opt/redbox-portal/node_modules/redbox-hook-dev; fi \
-  && rm -f "/tmp/${HOOK_TARBALL}" \
-  && mkdir -p /opt/redbox-portal/language-defaults /opt/redbox-portal/bootstrap-data \
-  && cp -a /opt/sails-hook-redbox-servicenow-catalog/language-defaults/. /opt/redbox-portal/language-defaults/ \
-  && cp -a /opt/sails-hook-redbox-servicenow-catalog/bootstrap-data/. /opt/redbox-portal/bootstrap-data/
+  && HOOK_TARBALL="$(npm pack --ignore-scripts --pack-destination /tmp --silent)" \
+  && mkdir -p /opt/redbox-portal/node_modules/@researchdatabox/sails-hook-redbox-servicenow-catalog \
+  && tar -xzf "/tmp/${HOOK_TARBALL}" -C /opt/redbox-portal/node_modules/@researchdatabox/sails-hook-redbox-servicenow-catalog --strip-components=1 \
+  && npm pkg set --prefix /opt/redbox-portal "dependencies.@researchdatabox/sails-hook-redbox-servicenow-catalog=1.0.0" \
+  && rm -f "/tmp/${HOOK_TARBALL}"
 
-FROM ${REDBOX_BASE_IMAGE} AS sails-hook-redbox-servicenow-catalog
+FROM ${REDBOX_PORTAL_IMAGE} AS sails-hook-redbox-servicenow-catalog
+
 USER root
 
-COPY --from=builder --chown=node:node --chmod='u=rwx,g=rx,o=rx' /opt/redbox-portal /opt/redbox-portal
+COPY --from=builder --chown=node:node /opt/redbox-portal/package.json /opt/redbox-portal/package.json
+COPY --from=builder --chown=node:node /opt/redbox-portal/node_modules/@researchdatabox/sails-hook-redbox-servicenow-catalog /opt/redbox-portal/node_modules/@researchdatabox/sails-hook-redbox-servicenow-catalog
+COPY --from=builder --chown=node:node /opt/sails-hook-redbox-servicenow-catalog/language-defaults/ /opt/redbox-portal/language-defaults/
 
 USER node
