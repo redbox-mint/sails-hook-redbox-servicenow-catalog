@@ -29,13 +29,21 @@ describe('named ServiceNow catalog configuration', function () {
     const definition = createDefaultCatalogDefinition();
     expect(definition).to.have.nested.property('responseNormalization.parseJsonString', true);
     expect(definition).to.have.nested.property('idempotency.enabled', false);
+    expect(definition.requestFilters).to.deep.equal([]);
     expect(definition.responseFields).to.deep.equal({ workspace: [], parentRecord: [] });
   });
 
   it('validates the canonical named-catalog schema', function () {
     const rootSchema = SERVICENOW_CATALOG_SCHEMA as {
       required: string[];
-      properties: { catalogs: { additionalProperties: { required: string[] } } };
+      properties: {
+        catalogs: {
+          additionalProperties: {
+            required: string[];
+            properties: Record<string, unknown>;
+          }
+        }
+      };
     };
     expect(rootSchema.required).to.deep.equal(['enabled', 'catalogs']);
     expect(rootSchema.properties.catalogs.additionalProperties.required).to.include.members([
@@ -46,6 +54,8 @@ describe('named ServiceNow catalog configuration', function () {
       'requestFields',
       'responseFields'
     ]);
+    expect(rootSchema.properties.catalogs.additionalProperties.properties)
+      .to.have.property('requestFilters');
   });
 
   it('expands concrete secret paths for named catalogs and keeps temporary legacy paths', function () {

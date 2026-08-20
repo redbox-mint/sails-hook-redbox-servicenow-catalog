@@ -188,6 +188,29 @@ describe('ServiceNow catalog orchestration', function () {
         source: { kind: 'jsonata', expression: 'trigger.event' }
       }
     ];
+    config.bodyTemplate.variables = {
+      requesterEmail: 'admin@example.com',
+      contributors: [
+        { email: 'ada@auckland.ac.nz' },
+        { email: 'grace@example.com' }
+      ]
+    };
+    config.requestFilters = [
+      {
+        destination: 'variables.requesterEmail',
+        source: {
+          kind: 'jsonata',
+          expression: '$substringAfter($lowercase(value), "@") = "auckland.ac.nz" ? value : null'
+        }
+      },
+      {
+        destination: 'variables.contributors',
+        source: {
+          kind: 'jsonata',
+          expression: '$append([], $filter(value, function($person) { $substringAfter($lowercase($string($person.email)), "@") = "auckland.ac.nz" }))'
+        }
+      }
+    ];
     config.responseFields = {
       workspace: [{
         destination: 'metadata.servicenow_number',
@@ -242,7 +265,8 @@ describe('ServiceNow catalog orchestration', function () {
       variables: {
         short_description: 'Research storage',
         plan: 'Plan A (brand-a)',
-        event: 'create'
+        event: 'create',
+        contributors: [{ email: 'ada@auckland.ac.nz' }]
       }
     });
     expect(addWorkspaceToRecord.mock.calls[0].arguments).to.deep.equal(['parent-1', 'workspace-1']);
@@ -390,7 +414,11 @@ describe('ServiceNow catalog orchestration', function () {
         throw new Error('association unavailable');
       })
     });
-    const updateMeta = mock.fn(async () => ({ status: true }));
+    const updateMeta = mock.fn(async (
+      _brand: unknown,
+      _oid: string,
+      _record: Record<string, unknown>
+    ) => ({ status: true }));
     setHookTestGlobal('RecordsService', {
       getMeta: mock.fn(async () => ({ metadata: { title: 'Parent' } })),
       updateMeta
@@ -440,7 +468,11 @@ describe('ServiceNow catalog orchestration', function () {
       source: { kind: 'path', path: 'response.result.number' }
     }];
     configureBrandAndCatalog(config);
-    const updateMeta = mock.fn(async () => ({ status: true }));
+    const updateMeta = mock.fn(async (
+      _brand: unknown,
+      _oid: string,
+      _record: Record<string, unknown>
+    ) => ({ status: true }));
     setHookTestGlobal('RecordsService', { updateMeta });
     const audit = makeAuditService();
     setHookTestGlobal('IntegrationAuditService', audit);

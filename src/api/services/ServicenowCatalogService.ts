@@ -49,7 +49,7 @@ import {
   concludeCatalogIdempotency,
   type CatalogIdempotencyClaim
 } from './servicenow/idempotency';
-import { applyFieldMappings, evaluateBinding } from './servicenow/mapping';
+import { applyRequestCrosswalk, applyFieldMappings, evaluateBinding } from './servicenow/mapping';
 import { makeRuntimeLayer } from './servicenow/runtime';
 
 export interface WorkspaceRecord {
@@ -406,9 +406,10 @@ export namespace Services {
           );
         }
 
-        const requestBody = yield* applyFieldMappings(
+        const requestBody = yield* applyRequestCrosswalk(
           oid,
           config.requestFields,
+          config.requestFilters ?? [],
           this.mappingContext(workspaceData, parentRecord, runContext),
           structuredClone(config.bodyTemplate)
         );
@@ -835,6 +836,7 @@ export namespace Services {
         return invalid('ServiceNow Catalog request body template must be an object.');
       }
       if (!Array.isArray(config.requestFields)
+        || (config.requestFilters != null && !Array.isArray(config.requestFilters))
         || !isPlainObject(config.responseFields)
         || !Array.isArray(config.responseFields.workspace)
         || (config.responseFields.parentRecord != null && !Array.isArray(config.responseFields.parentRecord))) {
@@ -842,6 +844,7 @@ export namespace Services {
       }
       const mappings = [
         ...config.requestFields,
+        ...(config.requestFilters ?? []),
         ...config.responseFields.workspace,
         ...(config.responseFields.parentRecord ?? [])
       ];

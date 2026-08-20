@@ -3,6 +3,10 @@ import { handlebarsCompile, jsonataCompileAndEvaluate } from '@researchdatabox/s
 import type { ServiceNowFieldMapping, ValueBinding } from '../../configmodels/ServiceNowCatalogAppConfig';
 import { MappingError } from './errors';
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value != null && typeof value === 'object' && !Array.isArray(value);
+}
+
 /**
  * Field-mapping evaluation for the ServiceNow catalog integration.
  *
@@ -39,6 +43,23 @@ export function setPath<T>(target: T, path: string, value: unknown): T {
     current = current[segment] as Record<string, unknown>;
   }
   current[segments[segments.length - 1]] = value;
+  return target;
+}
+
+export function deletePath<T>(target: T, path: string): T {
+  const segments = path.split('.');
+  if (segments.length === 0 || segments.some(segment => segment === '' || isUnsafePathSegment(segment))) {
+    throw new Error(`Unsafe or empty destination path '${path}'.`);
+  }
+  let current = target as Record<string, unknown>;
+  for (const segment of segments.slice(0, -1)) {
+    const next = current[segment];
+    if (next == null || typeof next !== 'object') {
+      return target;
+    }
+    current = next as Record<string, unknown>;
+  }
+  delete current[segments[segments.length - 1]];
   return target;
 }
 
@@ -106,6 +127,60 @@ export function applyFieldMappings<T>(
     Effect.as(target),
     Effect.withSpan('servicenow.applyFieldMappings', {
       attributes: { oid, mappingCount: mappings.length }
+    })
+  );
+}
+
+export function applyRequestFilters<T>(
+  oid: string,
+  filters: ServiceNowFieldMapping[],
+  context: unknown,
+  target: T
+): Effect.Effect<T, MappingError> {
+  return Effect.forEach(
+    filters,
+    filter =>
+      Effect.gen(function* () {
+        const value = getPath(target, filter.destination);
+        const filterContext = isPlainObject(context)
+          ? { ...context, value, request: target }
+          : { context, value, request: target };
+        const result = yield* evaluateBinding(oid, filter.destination, filter.source, filterContext);
+        yield* Effect.try({
+          try: () => result == null
+            ? deletePath(target, filter.destination)
+            : setPath(target, filter.destination, result),
+          catch: cause => new MappingError({ oid, destination: filter.destination, cause })
+        });
+      }),
+    { discard: true }
+  ).pipe(
+    Effect.as(target),
+    Effect.withSpan('servicenow.applyRequestFilters', {
+      attributes: { oid, filterCount: filters.length }
+    })
+  );
+}
+
+/**
+ * Builds the outgoing ServiceNow body as one crosswalk phase. Filters run
+ * after field mappings so they can inspect the mapped value and the complete
+ * request, while the HTTP client only receives the finished result.
+ */
+export function applyRequestCrosswalk<T>(
+  oid: string,
+  mappings: ServiceNowFieldMapping[],
+  filters: ServiceNowFieldMapping[],
+  context: unknown,
+  target: T
+): Effect.Effect<T, MappingError> {
+  return Effect.gen(function* () {
+    const mappedTarget = yield* applyFieldMappings(oid, mappings, context, target);
+    yield* applyRequestFilters(oid, filters, context, mappedTarget);
+    return mappedTarget;
+  }).pipe(
+    Effect.withSpan('servicenow.applyRequestCrosswalk', {
+      attributes: { oid, mappingCount: mappings.length, filterCount: filters.length }
     })
   );
 }

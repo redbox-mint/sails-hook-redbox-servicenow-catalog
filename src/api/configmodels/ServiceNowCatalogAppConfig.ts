@@ -14,6 +14,17 @@ export interface ServiceNowFieldMapping {
   parseJson?: boolean;
 }
 
+/**
+ * A post-mapping request transform. The binding receives the current target
+ * value as `value`, the complete outgoing body as `request`, and the normal
+ * workspace/parent mapping context. A null/undefined result removes the
+ * destination; any other result replaces it.
+ */
+export interface ServiceNowRequestFilter {
+  destination: string;
+  source: ValueBinding;
+}
+
 export interface ServiceNowRetryConfig {
   maxAttempts: number;
   baseDelayMs: number;
@@ -52,6 +63,8 @@ export interface ServiceNowCatalogDefinition {
   bodyTemplate: Record<string, unknown>;
   /** Mappings from the stable submission context into the outgoing request body. */
   requestFields: ServiceNowFieldMapping[];
+  /** Optional JSONata/path transforms applied to the built request body. */
+  requestFilters?: ServiceNowRequestFilter[];
   /** Response mappings are independently applied to the workspace and optional parent. */
   responseFields: {
     workspace: ServiceNowFieldMapping[];
@@ -109,6 +122,7 @@ export function createDefaultCatalogDefinition(): ServiceNowCatalogDefinition {
       variables: {}
     },
     requestFields: [],
+    requestFilters: [],
     responseFields: {
       workspace: [],
       parentRecord: []
@@ -241,6 +255,7 @@ const CATALOG_DEFINITION_SCHEMA = {
     },
     bodyTemplate: { type: 'object', title: 'Request body template', default: {} },
     requestFields: { ...FIELD_MAPPINGS_SCHEMA, title: 'Request field mappings' },
+    requestFilters: { ...FIELD_MAPPINGS_SCHEMA, title: 'Request filters / transforms' },
     responseFields: {
       type: 'object',
       title: 'Response field mappings',

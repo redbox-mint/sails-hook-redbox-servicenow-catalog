@@ -1,6 +1,6 @@
 const { Cause, Effect, Exit } = require('effect') as typeof import('effect');
 const { expect } = require('@researchdatabox/redbox-dev-tools/testing') as { expect: Chai.ExpectStatic };
-const { applyFieldMappings } = require('../../dist/api/services/servicenow/mapping.js') as
+const { applyFieldMappings, applyRequestCrosswalk } = require('../../dist/api/services/servicenow/mapping.js') as
   typeof import('../../src/api/services/servicenow/mapping');
 
 describe('ServiceNow value-binding mappings', function () {
@@ -100,6 +100,46 @@ describe('ServiceNow value-binding mappings', function () {
       structuredClone(workspace)
     ));
     expect(statusResult).to.have.nested.property('metadata.status', 'Accepted');
+  });
+
+  it('filters outgoing values and removes a scalar when its filter returns null', async function () {
+    const request = {
+      variables: {
+        requesterEmail: 'admin@example.com',
+        contributors: [
+          { email: 'ada@auckland.ac.nz' },
+          { email: 'grace@example.com' }
+        ]
+      }
+    };
+    const result = await Effect.runPromise(applyRequestCrosswalk(
+      'workspace-filter-1',
+      [],
+      [
+        {
+          destination: 'variables.requesterEmail',
+          source: {
+            kind: 'jsonata',
+            expression: '$substringAfter($lowercase(value), "@") = "auckland.ac.nz" ? value : null'
+          }
+        },
+        {
+          destination: 'variables.contributors',
+          source: {
+            kind: 'jsonata',
+            expression: '$append([], $filter(value, function($person) { $substringAfter($lowercase($string($person.email)), "@") = "auckland.ac.nz" }))'
+          }
+        }
+      ],
+      { workspace: { metadata: {} } },
+      request
+    ));
+
+    expect(result).to.deep.equal({
+      variables: {
+        contributors: [{ email: 'ada@auckland.ac.nz' }]
+      }
+    });
   });
 
   it('returns a tagged MappingError for invalid parsed JSON', async function () {
