@@ -1,0 +1,92 @@
+networks:
+  main:
+
+volumes:
+  bruno-npm-cache:
+
+services:
+  redboxportal:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      target: sails-hook-redbox-servicenow-catalog
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      solr:
+        condition: service_healthy
+    expose:
+      - "1500"
+    environment:
+      - NODE_ENV=integrationtest
+      - NODE_PATH=/opt/redbox-portal/node_modules:/opt/redbox-portal/node_modules/@researchdatabox/redbox-core/node_modules
+      - PORT=1500
+      - sails_security__csrf=false
+      - LOAD_DEFAULT_FORMS=true
+    networks:
+      main:
+        aliases:
+          - redboxportal
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail http://localhost:1500/default/rdmp/home"]
+      interval: "10s"
+      timeout: "5s"
+      retries: 20
+      start_period: "90s"
+    init: true
+    entrypoint:
+      - /bin/bash
+      - -c
+      - cd /opt/redbox-portal && node app.js
+
+  bruno:
+    image: node:26.7.0-bookworm
+    depends_on:
+      redboxportal:
+        condition: service_healthy
+    volumes:
+      - "../../test/bruno:/opt/bruno-tests:ro"
+      - "bruno-npm-cache:/npm-cache"
+    environment:
+      - NPM_CONFIG_CACHE=/npm-cache
+    working_dir: /opt/bruno-tests
+    networks:
+      main:
+        aliases:
+          - bruno
+    entrypoint:
+      - /bin/sh
+      - -lc
+      - npm exec --yes --package @usebruno/cli@4.0.0 -- bru run compatibility --env integration --bail
+
+  mongodb:
+    image: mongo:7
+    networks:
+      main:
+        aliases:
+          - mongodb
+    healthcheck:
+      test: ['CMD-SHELL', "echo 'db.runCommand(\"ping\").ok' | mongosh"]
+      interval: "10s"
+      timeout: "5s"
+      retries: 10
+      start_period: "30s"
+
+  solr:
+    image: solr:8.11.1
+    expose:
+      - "8983"
+    healthcheck:
+      test: ['CMD-SHELL', 'curl http://localhost:8983']
+      interval: "10s"
+      timeout: "5s"
+      retries: 10
+      start_period: "30s"
+    networks:
+      main:
+        aliases:
+          - solr
+    entrypoint:
+      - docker-entrypoint.sh
+      - solr-precreate
+      - redbox
