@@ -38,6 +38,7 @@ import {
   causeMessage,
   errorDescription,
   errorHttpCode,
+  errorResponseSummary,
   type ServiceNowCatalogError
 } from './servicenow/errors';
 import { ServiceNowClientTag, type ServiceNowHttpResult } from './servicenow/http';
@@ -338,7 +339,15 @@ export namespace Services {
       }
 
       try {
-        return await this.concludeSubmit(oid, runContext, exit, response, idempotencyClaim);
+        return await this.concludeSubmit(
+          oid,
+          workspaceData,
+          brand,
+          runContext,
+          exit,
+          response,
+          idempotencyClaim
+        );
       } finally {
         if (idempotencyLock != null) {
           this.inFlightIdempotency.delete(idempotencyLock);
@@ -436,7 +445,8 @@ export namespace Services {
               message: 'ServiceNow catalog order failed.',
               httpStatusCode: error instanceof Object && 'statusCode' in error
                 ? (error as { statusCode?: number }).statusCode
-                : undefined
+                : undefined,
+              responseSummary: this.responseSummaryFor(error)
             })
           })
         );
@@ -493,6 +503,8 @@ export namespace Services {
 
     private async concludeSubmit(
       oid: string,
+      workspaceData: WorkspaceRecord,
+      brand: unknown,
       runContext: SubmitRunContext,
       exit: Exit.Exit<ServiceNowHttpResult, ServiceNowCatalogError>,
       response: TriggerResponse,
@@ -528,6 +540,13 @@ export namespace Services {
           }
         });
         await this.concludeIdempotency(idempotencyClaim, 'uncertain');
+        await this.persistWorkspaceSubmissionStatus(
+          oid,
+          workspaceData,
+          brand,
+          'Uncertain',
+          runContext.parentAudit
+        );
         return this.fail(response, '503', 'ServiceNow catalog request for ' + oid + ' was interrupted during shutdown.');
       }
 
@@ -538,6 +557,7 @@ export namespace Services {
         const uncertain = this.isUncertainSubmissionFailure(error);
         failCatalogAudit(runContext.parentAudit, error, {
           message,
+          responseSummary: this.responseSummaryFor(error),
           requestSummary: {
             catalog: runContext.catalog,
             event: runContext.event,
@@ -546,8 +566,16 @@ export namespace Services {
           }
         });
         await this.concludeIdempotency(idempotencyClaim, uncertain ? 'uncertain' : 'failed');
+        await this.persistWorkspaceSubmissionStatus(
+          oid,
+          workspaceData,
+          brand,
+          uncertain ? 'Uncertain' : 'Failed',
+          runContext.parentAudit
+        );
         this.logger.error(
           'ServiceNow catalog request failed for workspace ' + oid + ' [' + error._tag + ']: ' + message
+          + this.traceSuffix(runContext.parentAudit)
         );
         return this.fail(response, errorHttpCode(error), message);
       }
@@ -563,8 +591,74 @@ export namespace Services {
         }
       });
       await this.concludeIdempotency(idempotencyClaim, 'uncertain');
-      this.logger.error('ServiceNow catalog request crashed for workspace ' + oid + ': ' + causeMessage(defect));
+      await this.persistWorkspaceSubmissionStatus(
+        oid,
+        workspaceData,
+        brand,
+        'Uncertain',
+        runContext.parentAudit
+      );
+      this.logger.error(
+        'ServiceNow catalog request crashed for workspace ' + oid + ': ' + causeMessage(defect)
+        + this.traceSuffix(runContext.parentAudit)
+      );
       return this.fail(response, '500', 'ServiceNow catalog request failed for workspace ' + oid + '; check the server logs.');
+    }
+
+    private async persistWorkspaceSubmissionStatus(
+      oid: string,
+      workspaceData: WorkspaceRecord,
+      brand: unknown,
+      status: 'Failed' | 'Uncertain',
+      audit: IntegrationAuditContext | null
+    ): Promise<void> {
+      if (typeof RecordsService === 'undefined' || typeof RecordsService.updateMeta !== 'function') {
+        this.logger.warn(
+          'ServiceNow catalog could not persist workspace status because RecordsService is unavailable.'
+          + this.traceSuffix(audit)
+        );
+        return;
+      }
+
+      const updatedWorkspace = structuredClone(workspaceData);
+      updatedWorkspace.metadata = {
+        ...workspaceData.metadata,
+        servicenow_status: status
+      };
+      try {
+        const result = await RecordsService.updateMeta(brand, oid, updatedWorkspace);
+        if (result?.success === false) {
+          this.logger.error(
+            'ServiceNow catalog failed to persist workspace status for ' + oid + ': '
+            + String(result.message ?? 'RecordsService.updateMeta returned an unsuccessful response.')
+            + this.traceSuffix(audit)
+          );
+          return;
+        }
+        this.logger.verbose(
+          'ServiceNow catalog persisted workspace status ' + status + ' for ' + oid
+          + this.traceSuffix(audit)
+        );
+      } catch (error) {
+        this.logger.error(
+          'ServiceNow catalog failed to persist workspace status for ' + oid + ': '
+          + causeMessage(error)
+          + this.traceSuffix(audit)
+        );
+      }
+    }
+
+    private responseSummaryFor(error: unknown): Record<string, unknown> | undefined {
+      if (error == null || typeof error !== 'object' || !('_tag' in error)) {
+        return undefined;
+      }
+      return errorResponseSummary(error as ServiceNowCatalogError);
+    }
+
+    private traceSuffix(audit: IntegrationAuditContext | null): string {
+      return audit == null
+        ? ''
+        : ' [traceId=' + audit.traceId + ' spanId=' + audit.spanId + ']';
     }
 
     private isUncertainSubmissionFailure(error: ServiceNowCatalogError): boolean {

@@ -410,7 +410,12 @@ describe('ServiceNow catalog orchestration', function () {
 
     expect(result).to.include({ code: '500', status: false, success: false });
     expect(requests).to.equal(0);
-    expect(updateMeta.mock.calls).to.have.length(0);
+    expect(updateMeta.mock.calls).to.have.length(1);
+    expect(updateMeta.mock.calls[0].arguments[1]).to.equal('workspace-association-failure');
+    expect(updateMeta.mock.calls[0].arguments[2]).to.have.nested.property(
+      'metadata.servicenow_status',
+      'Failed'
+    );
     expect(submittedWorkspace).to.deep.equal(original);
     expect(audit.failAudit.mock.calls.length).to.be.greaterThan(0);
   });
@@ -437,7 +442,8 @@ describe('ServiceNow catalog orchestration', function () {
     configureBrandAndCatalog(config);
     const updateMeta = mock.fn(async () => ({ status: true }));
     setHookTestGlobal('RecordsService', { updateMeta });
-    setHookTestGlobal('IntegrationAuditService', makeAuditService());
+    const audit = makeAuditService();
+    setHookTestGlobal('IntegrationAuditService', audit);
     const submittedWorkspace = workspace({ title: 'Preserve me' });
     const original = structuredClone(submittedWorkspace);
 
@@ -450,8 +456,19 @@ describe('ServiceNow catalog orchestration', function () {
     );
 
     expect(result).to.include({ code: '503', status: false, success: false });
-    expect(updateMeta.mock.calls).to.have.length(0);
+    expect(result.message).to.contain('unavailable');
+    expect(updateMeta.mock.calls).to.have.length(1);
+    expect(updateMeta.mock.calls[0].arguments[1]).to.equal('workspace-http-failure');
+    expect(updateMeta.mock.calls[0].arguments[2]).to.have.nested.property(
+      'metadata.servicenow_status',
+      'Failed'
+    );
     expect(submittedWorkspace).to.deep.equal(original);
+    const catalogFailure = audit.failAudit.mock.calls.find(call =>
+      call.arguments[0]?.integrationAction === 'catalogOrderRequest'
+    );
+    expect(catalogFailure).to.exist;
+    expect(catalogFailure?.arguments[2]?.responseSummary).to.deep.equal({ error: 'unavailable' });
   });
 
   it('rejects prior successful and interrupted idempotency keys', async function () {

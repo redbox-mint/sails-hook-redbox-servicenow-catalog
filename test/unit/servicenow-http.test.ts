@@ -136,6 +136,9 @@ describe('ServiceNow Effect HTTP client', function () {
           statusCode: 400,
           retryable: false
         });
+        if (failure.value._tag === 'CatalogRequestError') {
+          expect(failure.value.responseBody).to.deep.equal({ error: 'bad request' });
+        }
       }
     }
   });

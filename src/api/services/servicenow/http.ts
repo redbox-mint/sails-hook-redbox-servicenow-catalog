@@ -7,7 +7,13 @@ import type {
 import { normalizeServiceNowResponse } from './normalizeResponse';
 import { ServiceNowAuditAction, withIntegrationAudit } from './audit';
 import type { SubmitRunContext } from './context';
-import { CatalogRequestError, CatalogTimeoutError, OAuthTokenError, causeMessage } from './errors';
+import {
+  CatalogRequestError,
+  CatalogTimeoutError,
+  OAuthTokenError,
+  causeMessage,
+  errorResponseSummary
+} from './errors';
 
 export interface ServiceNowHttpResult {
   statusCode: number;
@@ -75,7 +81,8 @@ function fetchOAuthToken(
       return yield* Effect.fail(new OAuthTokenError({
         oid,
         reason: `Token endpoint responded with status ${response.status}.`,
-        statusCode: response.status
+        statusCode: response.status,
+        responseBody: response.data
       }));
     }
     const tokenData = typeof response.data === 'object' && response.data !== null
@@ -86,7 +93,8 @@ function fetchOAuthToken(
       return yield* Effect.fail(new OAuthTokenError({
         oid,
         reason: 'OAuth token response did not include an access token.',
-        statusCode: response.status
+        statusCode: response.status,
+        responseBody: response.data
       }));
     }
     return accessToken;
@@ -106,7 +114,8 @@ function fetchOAuthToken(
       onSuccess: () => ({ message: 'ServiceNow OAuth token acquired.' }),
       onFailure: error => ({
         message: 'ServiceNow OAuth token request failed.',
-        httpStatusCode: error instanceof OAuthTokenError ? error.statusCode : undefined
+        httpStatusCode: error instanceof OAuthTokenError ? error.statusCode : undefined,
+        responseSummary: error instanceof OAuthTokenError ? errorResponseSummary(error) : undefined
       })
     })
   );
