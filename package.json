@@ -42,10 +42,10 @@
     "url": "git@github.com:redbox-mint/sails-hook-redbox-servicenow-catalog.git"
   },
   "peerDependencies": {
-    "@researchdatabox/redbox-core": ">=0.0.1-beta.9022 <=0.0.1-beta.10300"
+    "@researchdatabox/redbox-core": ">=5.0.4-beta.12498 <6.0.0"
   },
   "devDependencies": {
-    "@researchdatabox/redbox-dev-tools": "0.0.1-beta.10300",
+    "@researchdatabox/redbox-dev-tools": "5.0.4",
     "@types/node": "24.12.2"
   }
 }

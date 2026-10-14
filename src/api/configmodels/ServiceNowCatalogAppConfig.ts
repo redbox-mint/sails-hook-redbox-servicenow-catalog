@@ -1,9 +1,11 @@
-import type { ValueBinding as CoreValueBinding } from '@researchdatabox/redbox-core';
+import type { SimpleValueBinding as CoreValueBinding } from '@researchdatabox/redbox-core';
 
 /** Brand-aware application configuration for reusable ServiceNow catalog submissions. */
 
 // Reuse the binding contract exposed by core so ServiceNow mappings stay aligned
-// with the DOI and Figshare configuration editors.
+// with the DOI and Figshare configuration editors. Core's root `ValueBinding`
+// is the Figshare union, which adds `crosswalk`; ServiceNow supports only the
+// simple kinds.
 export type ValueBinding = CoreValueBinding;
 
 export interface ServiceNowFieldMapping {

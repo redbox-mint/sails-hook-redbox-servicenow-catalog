@@ -17,7 +17,7 @@ type RegisteredConfigModel = {
 };
 
 type HookInstance = {
-  initialize(done: () => void): void;
+  initialize(): Promise<void>;
   routes: { after: Record<string, { controller: string; action: string }> };
 };
 
@@ -52,7 +52,7 @@ describe('ServiceNow catalog hook entrypoint', function () {
     expect(hookModule.registerFormConfig).to.equal(undefined);
   });
 
-  it('registers the named-catalog application config model during lift', function () {
+  it('registers the named-catalog application config model during lift', async function () {
     const registered: RegisteredConfigModel[] = [];
     let moduleLoaderHandler: (() => void) | undefined;
     const testSails = getTestSails();
@@ -66,14 +66,10 @@ describe('ServiceNow catalog hook entrypoint', function () {
     };
 
     const hook = hookModule(testSails);
-    let initialized = false;
-    hook.initialize(() => {
-      initialized = true;
-    });
+    await hook.initialize();
     expect(moduleLoaderHandler).to.be.a('function');
     moduleLoaderHandler?.();
 
-    expect(initialized).to.equal(true);
     expect(registered).to.have.length(1);
     expect(registered[0]).to.include({
       key: 'servicenowCatalog',
