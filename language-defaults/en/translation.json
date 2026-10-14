@@ -1,0 +1,21 @@
+{
+  "@servicenow-catalog-storage-type": "Please select one of the following storage options:",
+  "@servicenow-catalog-storage-type-help": "Select which storage option is best suited to your research project.",
+  "@servicenow-catalog-storage-type-hpc": "High Performance Computing (HPC)",
+  "@servicenow-catalog-storage-type-cloudstor": "Cloudstor",
+  "@servicenow-catalog-storage-type-s3": "S3 (StorageGrid)",
+  "@servicenow-catalog-storage-type-gcp": "Google Cloud Platform (GCP)",
+  "@servicenow-catalog-storage-size": "How much storage do you require?",
+  "@servicenow-catalog-storage-size-help": "",
+  "@servicenow-catalog-storage-size-less-than-1tb": "less than 1TB",
+  "@servicenow-catalog-storage-size-1-5tb": "1-5TB",
+  "@servicenow-catalog-storage-size-more-than-5tb": "More than 5TB",
+  "@servicenow-catalog-submit-request": "Submit Request",
+  "@servicenow-catalog-label": "ServiceNow Request",
+  "@servicenow-catalog-description": "",
+  "@integration-status-outcome-servicenow-catalog-none": "Not provisioned",
+  "@integration-status-outcome-servicenow-catalog-in-progress": "Provisioning",
+  "@integration-status-outcome-servicenow-catalog-provisioned": "Provisioned",
+  "@integration-status-outcome-servicenow-catalog-error": "Provisioning failed",
+  "@integration-status-outcome-servicenow-catalog-error-help": "The ServiceNow catalog request failed. Review the integration audit for details."
+}

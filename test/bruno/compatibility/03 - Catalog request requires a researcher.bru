@@ -1,0 +1,37 @@
+meta {
+  name: Catalog request requires a researcher
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{host}}/default/rdmp/ws/catalog/request
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+  X-Source: jsclient
+}
+
+body:json {
+  {
+    "rdmp": "parent-1",
+    "catalogName": "Storage",
+    "request": {},
+    "workspaceInfo": {},
+    "workspaceType": "Storage"
+  }
+}
+
+tests {
+  test("Status code is 403", function () {
+    expect(res.getStatus()).to.equal(403);
+  });
+
+  test("Response is access denied", function () {
+    expect(res.getBody().message).to.eql("Access Denied");
+  });
+}
