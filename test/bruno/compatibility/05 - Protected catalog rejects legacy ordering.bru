@@ -1,0 +1,28 @@
+meta {
+  name: Protected catalog rejects legacy ordering
+  type: http
+  seq: 5
+}
+post {
+  url: {{host}}/default/rdmp/ws/catalog/request
+  body: json
+  auth: none
+}
+headers {
+  Content-Type: application/json
+  X-Source: jsclient
+  Cookie: {{catalogCookie}}
+}
+body:json {
+  {"rdmp":"parent-1","catalogName":"Storage","request":{},"workspaceInfo":{},"workspaceType":"Storage"}
+}
+tests {
+  test("Protected brand cannot bypass shared claims through legacy ordering", () => {
+    expect(res.getStatus()).to.equal(200);
+    expect(res.getBody().status).to.equal(false);
+    expect(res.getBody().message).to.equal('Use the protected named-catalog record submission flow.');
+  });
+}
+docs {
+  Authenticated legacy calls must not bypass named-catalog shared dispatch claims.
+}
