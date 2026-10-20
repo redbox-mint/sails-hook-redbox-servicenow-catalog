@@ -39,7 +39,7 @@ describe('ServiceNow catalog hook integration', function () {
     expect(sails.services.servicenowcatalogservice).to.exist;
 
     const hookModule = require('@researchdatabox/sails-hook-redbox-servicenow-catalog') as HookModule;
-    expect(hookModule.registerRedboxModels()).to.have.keys(['ServicenowCatalogIdempotency']);
+    expect(hookModule.registerRedboxModels()).to.have.keys(['ServicenowCatalogIdempotency', 'ServicenowCatalogResourceClaim']);
     expect(hookModule.registerRedboxFormConfigs).to.equal(undefined);
     expect(hookModule.registerRedboxConfig()).to.have.keys(['auth', 'servicenowCatalog']);
     expect(sails.config.recordtype).not.to.have.property('servicenow-catalog');

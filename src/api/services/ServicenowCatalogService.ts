@@ -1,3 +1,4 @@
+import { acquireResources, resourceKeys, transitionResources, releaseReserved, requestResources, releaseRevertedResources, ResourceOccupiedError } from './servicenow/resource-claims';
 import { Services as CoreServices } from '@researchdatabox/redbox-core';
 import { Cause, Duration, Effect, Exit, Fiber } from 'effect';
 import {
@@ -94,12 +95,16 @@ export namespace Services {
     protected override _exportedMethods: string[] = [
       'init',
       'submitRequest',
-      'remapData'
+      'remapData',
+      'releaseRequestClaims',
+      'supportsDispatchClaims'
     ];
 
     private readonly inFlight = new Set<Fiber.RuntimeFiber<ServiceNowHttpResult, ServiceNowCatalogError>>();
     private readonly inFlightIdempotency = new Set<string>();
     private legacyConfigWarningEmitted = false;
+
+    public supportsDispatchClaims(): boolean { return true; }
 
     public init(): void {
       this.registerSailsHook('on', 'ready', () => this.registerOutcomeMapper());
@@ -339,6 +344,16 @@ export namespace Services {
       }
 
       try {
+        if (runContext.resourceClaims) {
+          try {
+            if (Exit.isSuccess(exit)) await transitionResources(runContext.resourceClaims, 'submitted');
+            else if (runContext.dispatchStarted) await transitionResources(runContext.resourceClaims, 'uncertain');
+            else await releaseReserved(runContext.resourceClaims);
+          } catch (error) {
+            // An occupied claim remains safe even if the final checkpoint cannot be saved.
+            this.logger.error('Unable to conclude ServiceNow resource claims: ' + causeMessage(error));
+          }
+        }
         return await this.concludeSubmit(
           oid,
           workspaceData,
@@ -353,6 +368,31 @@ export namespace Services {
           this.inFlightIdempotency.delete(idempotencyLock);
         }
       }
+    }
+
+    /** Post-delete cleanup: authoritative tombstone + administrator + detached parent. */
+    public async releaseRequestClaims(oid: string, _workspace: WorkspaceRecord, _options: unknown,
+      user: Record<string, unknown> | undefined, response: TriggerResponse): Promise<TriggerResponse> {
+      const deleted = await RecordsService.getDeletedRecordMeta(oid);
+      if (!deleted || deleted.lifecycleState !== 'deleted') throw new Error('Resource claims require a confirmed deleted request.');
+      const resolved = this.resolveBrand(oid, { metadata: deleted.metadata, metaMetadata: { brandId: deleted.metaMetadata.brandId } });
+      if (resolved instanceof ServiceNowConfigError) throw resolved;
+      const authoritativeBrand = BrandingService.getBrandById(resolved.brandId);
+      const admin = authoritativeBrand && RolesService.getAdmin(authoritativeBrand);
+      if (!user || !admin || !UsersService.hasRole(user, admin)) throw new Error('Only a brand administrator may release reverted request claims.');
+      // Claim identity is server-owned and independent of customer field names
+      // or edits to the deleted request's metadata/configuration.
+      const claims = await requestResources(resolved.brandId, oid);
+      const parents = [...new Set(claims.map(claim => claim.parentOid))];
+      for (const parentOid of parents) {
+        const parent = await RecordsService.getMeta(parentOid);
+        if (parent.metaMetadata?.brandId !== resolved.brandId || !RecordsService.hasEditAccess(resolved.brand, user, Array.isArray(user.roles) ? user.roles : [], parent)) throw new Error('Revert parent access denied.');
+        const rawLinks: unknown = parent.metadata.workspaces;
+        const links = rawLinks == null ? [] : Array.isArray(rawLinks) ? rawLinks : [rawLinks];
+        if (links.some(link => link === oid || (typeof link === 'object' && link != null && Reflect.get(link, 'id') === oid))) throw new Error('Reverted request remains linked to its parent.');
+      }
+      for (const parentOid of parents) await releaseRevertedResources(resolved.brandId, parentOid, oid);
+      return response;
     }
 
     /** Apply the shared ValueBinding model to a caller-provided stable context. */
@@ -391,6 +431,17 @@ export namespace Services {
             })
           );
 
+          if (config.dispatchClaim?.enabled) {
+            if (parentRecord.metaMetadata == null || !isPlainObject(parentRecord.metaMetadata) || parentRecord.metaMetadata.brandId !== runContext.brandId) {
+              return yield* Effect.fail(new ServiceNowConfigError({ oid, reason: 'Parent brand does not match the protected request.', httpCode: '403' }));
+            }
+            const resolvedResources = yield* evaluateBinding(oid, 'dispatchClaim.resources', config.dispatchClaim.resources!, this.mappingContext(workspaceData, parentRecord, runContext));
+            runContext.resourceClaims = yield* Effect.tryPromise({
+              try: () => acquireResources({ brandId: runContext.brandId!, parentOid: parentRecordOid, requestOid: oid, catalog: runContext.catalog }, resourceKeys(resolvedResources)),
+              catch: cause => new ServiceNowConfigError({ oid, reason: causeMessage(cause), httpCode: cause instanceof ResourceOccupiedError ? '409' : '503' })
+            });
+          }
+
           yield* Effect.tryPromise({
             try: () => WorkspaceService.addWorkspaceToRecord(parentRecordOid, oid),
             catch: cause => new ParentAssociationError({ oid, parentRecordOid, cause })
@@ -423,6 +474,14 @@ export namespace Services {
           })
         );
 
+        if (runContext.resourceClaims) {
+          // Conservatively retain ownership if interrupted during transition or HTTP.
+          runContext.dispatchStarted = true;
+          yield* Effect.tryPromise({
+            try: () => transitionResources(runContext.resourceClaims!, 'dispatching'),
+            catch: cause => new ServiceNowConfigError({ oid, reason: causeMessage(cause), httpCode: '503' })
+          });
+        }
         const result = yield* client.submitCatalogOrder(requestBody).pipe(
           withIntegrationAudit(oid, ServiceNowAuditAction.catalogOrderRequest, {
             brandId: runContext.brandId,
@@ -627,7 +686,19 @@ export namespace Services {
         servicenow_status: status
       };
       try {
-        const result = await RecordsService.updateMeta(brand, oid, updatedWorkspace);
+        const result = typeof RecordsService.mutateMetaInternal === 'function'
+          ? await RecordsService.mutateMetaInternal({
+            actor: { kind: 'service', id: 'ServicenowCatalogService.submissionStatus' },
+            authorization: { kind: 'service' }, oid,
+            triggerPreSaveTriggers: false, triggerPostSaveTriggers: false,
+            retry: { idempotent: true, recomputable: true, maxAttempts: 3 },
+            mutate: snapshot => {
+              if (snapshot.metaMetadata?.brandId !== workspaceData.metaMetadata?.brandId) throw new Error('Submission status brand mismatch.');
+              snapshot.metadata.servicenow_status = status;
+              return snapshot;
+            }
+          })
+          : await RecordsService.updateMeta(brand, oid, updatedWorkspace);
         if (result?.success === false) {
           this.logger.error(
             'ServiceNow catalog failed to persist workspace status for ' + oid + ': '
@@ -871,6 +942,11 @@ export namespace Services {
           || typeof config.responseNormalization.parseJsonString !== 'boolean')) {
         return invalid('ServiceNow Catalog response normalization configuration is invalid.');
       }
+      if (config.dispatchClaim != null) {
+        if (!isPlainObject(config.dispatchClaim) || typeof config.dispatchClaim.enabled !== 'boolean') return invalid('Invalid shared dispatch claim configuration.');
+        if (config.dispatchClaim.enabled && (!config.parentRecord || !config.idempotency?.enabled || !config.dispatchClaim.resources)) return invalid('Shared dispatch claims require a parent, resources binding and request idempotency.');
+        if (config.dispatchClaim.resources && this.validateBinding(config.dispatchClaim.resources, 'Dispatch resources')) return invalid('Invalid dispatch resources binding.');
+      }
       if (config.idempotency != null) {
         if (!isPlainObject(config.idempotency) || typeof config.idempotency.enabled !== 'boolean') {
           return invalid('ServiceNow Catalog idempotency configuration is invalid.');
@@ -929,6 +1005,9 @@ export namespace Services {
       config: ServiceNowCatalogDefinition,
       mappingContext: unknown
     ): Promise<BoundValueResult> {
+      if (config.dispatchClaim?.enabled && trigger.parentRecordOid) {
+        return { error: new ServiceNowConfigError({ oid, reason: 'A protected catalog cannot override the configured parent.', httpCode: '400' }) };
+      }
       if (trigger.parentRecordOid) {
         return { value: trigger.parentRecordOid };
       }
@@ -1150,7 +1229,7 @@ export namespace Services {
 
 export type ServicenowCatalogService = Pick<
   Services.ServicenowCatalog,
-  'init' | 'submitRequest' | 'remapData'
+  'init' | 'submitRequest' | 'remapData' | 'releaseRequestClaims' | 'supportsDispatchClaims'
 >;
 export const ServicenowCatalogService = new Services.ServicenowCatalog().exports() as ServicenowCatalogService;
 

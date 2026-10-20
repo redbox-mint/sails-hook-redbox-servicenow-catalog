@@ -37,7 +37,9 @@ services:
     entrypoint:
       - /bin/bash
       - -c
-      - cd /opt/redbox-portal && node app.js
+      - >-
+        cd /opt/redbox-portal && node -e
+        'require("@researchdatabox/redbox-core").generateAllShims(process.cwd(),{forceRegenerate:true}).then(()=>require("sails").lift({...require("rc")("sails"),servicenowCatalog:{enabled:false,catalogs:{protected:{dispatchClaim:{enabled:true}}}}}))'
 
   bruno:
     image: node:26.7.0-bookworm

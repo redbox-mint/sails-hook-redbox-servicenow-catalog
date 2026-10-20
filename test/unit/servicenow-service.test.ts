@@ -1039,4 +1039,87 @@ describe('ServiceNow catalog orchestration', function () {
     expect(mapper({ status: 'none' })).to.deep.include({ state: 'none', severity: 'none' });
     expect(mapper({ status: 'unexpected' })).to.equal(undefined);
   });
+  it('releases only the private claimed parent after authorised detachment', async () => {
+    const { resourceModel } = require('../support/resource-claims') as typeof import('../support/resource-claims');
+    const { acquireResources, transitionResources } = require('../../dist/api/services/servicenow/resource-claims') as typeof import('../../src/api/services/servicenow/resource-claims');
+    const ledger = resourceModel();
+    setHookTestGlobal('ServicenowCatalogResourceClaim', ledger);
+    configureBrandAndCatalog(createDefaultCatalogDefinition());
+    const claims = await acquireResources({ brandId: 'brand-id', parentOid: 'private-parent', requestOid: 'request', catalog: 'storage-new' }, ['resource-a']);
+    await transitionResources(claims, 'submitted');
+    let links: unknown = { id: 'request' };
+    let authorised = false;
+    const parents: string[] = [];
+    setHookTestGlobal('RolesService', { getAdmin: () => 'brand-admin' });
+    setHookTestGlobal('UsersService', { hasRole: () => authorised });
+    setHookTestGlobal('RecordsService', {
+      getDeletedRecordMeta: async () => ({ lifecycleState: 'deleted', metadata: { customerParent: 'edited-parent' }, metaMetadata: { brandId: 'brand-id' } }),
+      getMeta: async (oid: string) => { parents.push(oid); return { metadata: { workspaces: links }, metaMetadata: { brandId: 'brand-id' } }; },
+      hasEditAccess: () => true
+    });
+    const attempt = async () => {
+      try { await service.releaseRequestClaims('request', workspace(), {}, { roles: [] }, {}); return undefined; }
+      catch (error) { return error; }
+    };
+    expect(await attempt()).to.be.instanceOf(Error);
+    expect(parents).to.have.length(0);
+    authorised = true;
+    expect(await attempt()).to.be.instanceOf(Error);
+    expect(ledger.rows.size).to.equal(1);
+    links = 'request';
+    expect(await attempt()).to.be.instanceOf(Error);
+    links = [];
+    expect(await attempt()).to.equal(undefined);
+    expect(parents).to.deep.equal(['private-parent', 'private-parent', 'private-parent']);
+    expect(ledger.rows.size).to.equal(0);
+  });
+
+  for (const uncertain of [false, true]) {
+    it(`excludes different request OIDs and retains ${uncertain ? 'uncertain' : 'submitted'} resources`, async () => {
+      let finish: () => void = () => undefined;
+      let reached: () => void = () => undefined;
+      const received = new Promise<void>(resolve => { reached = resolve; });
+      const hold = new Promise<void>(resolve => { finish = resolve; });
+      let count = 0;
+      const endpoint = await listen(async (_req, res) => {
+        count++; reached(); await hold;
+        res.statusCode = uncertain ? 503 : 201;
+        res.setHeader('Content-Type', 'application/json'); res.end('{}');
+      });
+      activeServer = endpoint.server;
+      const config = createDefaultCatalogDefinition();
+      config.connection.url = endpoint.url;
+      config.connection.retry.maxAttempts = 1;
+      config.parentRecord = { oid: { kind: 'path', path: 'workspace.metadata.parentOid' } };
+      config.idempotency = { enabled: true, key: { kind: 'handlebars', template: '{{oid}}' } };
+      config.dispatchClaim = { enabled: true, resources: { kind: 'path', path: 'workspace.metadata.options' } };
+      configureBrandAndCatalog(config);
+      const { resourceModel } = require('../support/resource-claims') as typeof import('../support/resource-claims');
+      const ledger = resourceModel();
+      setHookTestGlobal('ServicenowCatalogResourceClaim', ledger);
+      setHookTestGlobal('IntegrationAuditService', makeAuditService());
+      setHookTestGlobal('RecordsService', {
+        getMeta: async () => ({ metadata: {}, metaMetadata: { brandId: 'brand-id' } }),
+        updateMeta: async () => ({ success: true })
+      });
+      const associated: string[] = [];
+      setHookTestGlobal('WorkspaceService', { addWorkspaceToRecord: async (_parent: string, oid: string) => { associated.push(oid); } });
+      const input = workspace({ parentOid: 'parent', options: ['resource-a'] });
+      const first = service.submitRequest('request-a', input, { catalog: 'storage-new', event: 'create' }, {}, successResponse());
+      try {
+        await received;
+        const second = await service.submitRequest('request-b', input, { catalog: 'storage-new', event: 'create' }, {}, successResponse());
+        expect(second).to.include({ code: '409', status: false, success: false });
+        expect(associated).to.deep.equal(['request-a']);
+      } finally { finish(); }
+      const outcome = await first;
+      expect(outcome.success).to.equal(!uncertain);
+      expect([...ledger.rows.values()][0]!.state).to.equal(uncertain ? 'uncertain' : 'submitted');
+      const third = await service.submitRequest('request-c', input, { catalog: 'storage-new', event: 'create' }, {}, successResponse());
+      expect(third.code).to.equal('409');
+      expect(count).to.equal(1);
+      Reflect.deleteProperty(globalThis, 'ServicenowCatalogResourceClaim');
+    });
+  }
+
 });

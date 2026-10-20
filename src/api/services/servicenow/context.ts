@@ -1,3 +1,4 @@
+import type { ResourceClaim } from './resource-claims';
 import { Context } from 'effect';
 import type { ServiceNowCatalogDefinition } from '../../configmodels/ServiceNowCatalogAppConfig';
 import type { IntegrationAuditContext } from './audit';
@@ -26,6 +27,8 @@ export interface SubmitRunContext {
   triggeredBy?: string;
   parentAudit: IntegrationAuditContext | null;
   now: string;
+  resourceClaims?: ResourceClaim[];
+  dispatchStarted?: boolean;
 }
 
 export const ServiceNowConfigTag = Context.GenericTag<ServiceNowCatalogDefinition>(

@@ -130,6 +130,13 @@ describe('ServiceNow catalog API components', function () {
     expect(captured.value()).to.deep.equal({ status: false });
   });
 
+  it('blocks legacy ordering for a brand with shared dispatch claims', async () => {
+    Reflect.set(getTestSails().config, 'servicenowCatalog', { catalogs: { storage: { dispatchClaim: { enabled: true } } } });
+    const captured = responseCapture();
+    await hookModule.registerRedboxControllers().CatalogController.request(request(), captured.res);
+    expect(captured.value()).to.deep.equal({ status: false, message: 'Use the protected named-catalog record submission flow.' });
+  });
+
   it('uses configured customer record/workflow names and preserves the legacy success shape', async function () {
     const requests: Array<{ method?: string; url?: string }> = [];
     const testServer = await listen((req, res) => {

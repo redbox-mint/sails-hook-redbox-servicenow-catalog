@@ -93,7 +93,10 @@ export function clearHookTestGlobals(): void {
     'BrandingService',
     'IntegrationAuditService',
     'RecordsService',
+    'RolesService',
+    'UsersService',
     'ServicenowCatalogIdempotency',
+    'ServicenowCatalogResourceClaim',
     'TranslationService',
     'WorkspaceService'
   ]) {

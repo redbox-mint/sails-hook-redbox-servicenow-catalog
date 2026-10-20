@@ -205,7 +205,7 @@ through `WorkspaceService.addWorkspaceToRecord`, and applies optional parent
 response mappings through `RecordsService.updateMeta`.
 
 Catalogs without a parent binding perform no parent lookup, association, or
-parent update. No generic code assumes `metadata.rdmpOid`.
+parent update. Parent identity is resolved through the configured binding.
 
 ## Response normalization
 
@@ -299,3 +299,20 @@ matching `vMAJOR.MINOR.PATCH` publish the matching package version with the npm
 Beta packages are published by triggering a CircleCI pipeline with
 `npm_publish_mode=beta`, a stable base `npm_publish_version`, and an
 `npm_publish_dist_tag` such as `beta`, `next`, or `alpha`.
+
+### Shared parent/resource dispatch claims
+
+A named catalog can opt into shared parent/resource dispatch claims:
+
+```json
+"dispatchClaim": {
+  "enabled": true,
+  "resources": { "kind": "path", "path": "workspace.metadata.requestedResources" }
+}
+```
+
+This requires `parentRecord.oid` and enabled request idempotency. The plugin claims each resource string under **brand + parent OID + resource**, independently of catalog/request OID. Acquire all options before associating the request or sending HTTP. Success and uncertain outcomes retain ownership; database failures prevent dispatch. Other catalogs retain their existing behaviour when this setting is absent/false. Legacy `/ws/catalog/request` ordering is unavailable for brands opting into shared claims, because that route has no persisted request identity before HTTP.
+
+Customer hooks still enforce authoritative eligibility and permissions, including requests created before these claim rows existed. Keep the ordinary awaited post-save call; no queue is introduced. The existing same-request replay ledger remains separate.
+
+`releaseRequestClaims` is a server-side post-delete hook, not an HTTP reset API. It verifies a completed deleted lifecycle, the brand administrator role, parent edit access and removal of the parent link, then releases only that deleted request's owned claims. Incomplete dispatches remain occupied. An ambiguous HTTP result never authorises a second request automatically. As with other external integrations, the database and remote HTTP call are not one atomic transaction.

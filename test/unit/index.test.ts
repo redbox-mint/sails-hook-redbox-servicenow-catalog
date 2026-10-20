@@ -45,7 +45,7 @@ describe('ServiceNow catalog hook entrypoint', function () {
 
   it('registers reusable config, model, controller, and service surfaces', function () {
     expect(hookModule.registerRedboxConfig()).to.have.keys(['auth', 'servicenowCatalog']);
-    expect(hookModule.registerRedboxModels()).to.have.keys(['ServicenowCatalogIdempotency']);
+    expect(hookModule.registerRedboxModels()).to.have.keys(['ServicenowCatalogIdempotency', 'ServicenowCatalogResourceClaim']);
     expect(hookModule.registerRedboxServices()).to.have.property('ServicenowCatalogService');
     expect(hookModule.registerRedboxControllers()).to.have.property('CatalogController');
     expect(hookModule.registerRedboxFormConfigs).to.equal(undefined);

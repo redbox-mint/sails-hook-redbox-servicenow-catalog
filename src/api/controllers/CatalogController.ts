@@ -1,3 +1,4 @@
+import { mergeConfig } from '../services/servicenow/configuration';
 import { Controllers as CoreControllers } from '@researchdatabox/redbox-core';
 import axios from 'axios';
 import { firstValueFrom } from 'rxjs';
@@ -76,6 +77,14 @@ export namespace Controllers {
 
     public async request(req: Sails.Req, res: Sails.Res): Promise<unknown> {
       try {
+        const brandName = String(req.param('branding') ?? 'default');
+        const brandConfig = typeof sails.config.brandingAware === 'function' ? sails.config.brandingAware(brandName) : {};
+        const integration = asRecord(mergeConfig(asRecord(Reflect.get(sails.config, 'servicenowCatalog')), asRecord(brandConfig).servicenowCatalog));
+        // Legacy orders have no stable request identity before HTTP. Never allow
+        // them to bypass an opted-in brand's named-catalog protection.
+        if (Object.values(asRecord(integration.catalogs)).some(value => asRecord(asRecord(value).dispatchClaim).enabled === true)) {
+          return this.legacyResponse(req, res, 'Use the protected named-catalog record submission flow.', { status: false, message: 'Use the protected named-catalog record submission flow.' });
+        }
         const workspaces = asRecord(sails.config.workspaces) as LegacyWorkspaceCatalogConfig;
         const config = workspaces.catalog ?? {};
         const domain = String(config.domain ?? '').replace(/\/$/, '');

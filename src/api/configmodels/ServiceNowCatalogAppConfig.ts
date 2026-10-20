@@ -80,6 +80,8 @@ export interface ServiceNowCatalogDefinition {
     /** Parse a JSON-encoded root response string when possible. */
     parseJsonString: boolean;
   };
+  /** Optional shared parent/resource exclusion, independent of request replay. */
+  dispatchClaim?: { enabled: boolean; resources?: ValueBinding };
   idempotency?: {
     enabled: boolean;
     /** Used when a trigger does not supply an explicit idempotency key. */
@@ -286,6 +288,13 @@ const CATALOG_DEFINITION_SCHEMA = {
         }
       },
       required: ['parseJsonString']
+    },
+    dispatchClaim: {
+      type: 'object', title: 'Shared dispatch claim',
+      properties: {
+        enabled: { type: 'boolean', title: 'Enabled', default: false },
+        resources: VALUE_BINDING_SCHEMA
+      }, required: ['enabled']
     },
     idempotency: {
       type: 'object',
