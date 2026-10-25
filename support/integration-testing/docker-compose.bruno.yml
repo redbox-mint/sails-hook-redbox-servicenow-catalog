@@ -44,7 +44,7 @@ services:
         'require("@researchdatabox/redbox-core").generateAllShims(process.cwd(),{forceRegenerate:true}).then(()=>require("sails").lift({...require("rc")("sails"),servicenowCatalog:{enabled:false,catalogs:{protected:{dispatchClaim:{enabled:true}}}}}))'
 
   bruno:
-    image: node:26.7.0-bookworm
+    image: node:26.12.1-bookworm
     depends_on:
       redboxportal:
         condition: service_healthy
