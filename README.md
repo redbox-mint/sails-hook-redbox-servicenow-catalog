@@ -249,6 +249,14 @@ response whose root value is a JSON-encoded string is parsed before response
 mapping. Object and array responses are unchanged. A root string that is not
 valid JSON is preserved as a string.
 
+OAuth and catalog responses are decompressed with strict zlib defaults before
+JSON parsing, including Brotli, gzip, and deflate. A corrupt or truncated catalog
+response fails with a non-retryable `CatalogRequestError` and an `Uncertain`
+submission state: ServiceNow may already have accepted the order, so replaying
+it automatically could create a duplicate. Normal failure audits are retained
+without the compressed payload or request credentials. Reconcile the upstream
+order before retrying an uncertain submission.
+
 ## Auditing and idempotency
 
 The integration audit records the overall submission and nested phases for

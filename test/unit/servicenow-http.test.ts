@@ -134,7 +134,7 @@ describe('ServiceNow Effect HTTP client', function () {
           const clock = yield* TestClock.testClockWith(Effect.succeed);
           axios.defaults.adapter = async request => {
             requestTimes.push(clock.currentTimeMillisUnsafe());
-            return { status: 503, statusText: 'Unavailable', data: {}, headers: {}, config: request };
+            return { status: 503, statusText: 'Unavailable', data: Buffer.from('{}'), headers: {}, config: request };
           };
           const fiber = yield* makeLiveClient(config, runContext()).submitCatalogOrder({}).pipe(
             Effect.forkChild

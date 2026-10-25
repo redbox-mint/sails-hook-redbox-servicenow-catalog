@@ -5,6 +5,7 @@ import type {
   ServiceNowOAuthConfig
 } from '../../configmodels/ServiceNowCatalogAppConfig';
 import { normalizeServiceNowResponse } from './normalizeResponse';
+import { decodeResponse, ResponseDecodingError } from './decodeResponse';
 import { ServiceNowAuditAction, withIntegrationAudit } from './audit';
 import type { SubmitRunContext } from './context';
 import {
@@ -73,8 +74,10 @@ function fetchOAuthToken(
         axios.post(config.oauth.url, params.toString(), {
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           signal,
+          decompress: false,
+          responseType: 'arraybuffer',
           validateStatus: () => true
-        }),
+        }).then(decodeResponse),
       catch: cause => new OAuthTokenError({ oid, reason: causeMessage(cause), cause })
     });
     if (response.status < 200 || response.status >= 300) {
@@ -166,9 +169,13 @@ export function makeLiveClient(
           },
           data: body,
           signal,
+          decompress: false,
+          responseType: 'arraybuffer',
           validateStatus: () => true
-        }),
-      catch: cause => new CatalogRequestError({ oid, retryable: true, cause })
+        }).then(decodeResponse),
+      // A decoding failure follows a received response: the order may already
+      // exist upstream. Do not automatically replay a side-effecting request.
+      catch: cause => new CatalogRequestError({ oid, retryable: !(cause instanceof ResponseDecodingError), cause })
     }).pipe(
       Effect.filterOrFail(
         response => response.status >= 200 && response.status < 300,

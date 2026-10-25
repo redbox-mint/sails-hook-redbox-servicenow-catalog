@@ -1,7 +1,6 @@
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import { listen } from './helpers';
 import type { ServicenowCatalogService } from '../../src/api/services/ServicenowCatalogService';
 
-const http = require('node:http') as typeof import('node:http');
 const { expect } = require('chai') as { expect: Chai.ExpectStatic };
 const { createDefaultCatalogDefinition } = require(
   '@researchdatabox/sails-hook-redbox-servicenow-catalog/dist/api/configmodels/ServiceNowCatalogAppConfig.js'
@@ -12,27 +11,6 @@ type HookModule = {
   registerRedboxModels(): Record<string, unknown>;
   registerRedboxFormConfigs?: () => unknown;
 };
-
-async function listen(
-  handler: (req: IncomingMessage, res: ServerResponse) => Promise<void>
-): Promise<{ close: () => Promise<void>; url: string }> {
-  const server = http.createServer((req, res) => void handler(req, res));
-  await new Promise<void>((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', resolve);
-  });
-  const address = server.address();
-  if (address == null || typeof address === 'string') {
-    throw new Error('Test server did not expose a TCP address.');
-  }
-  return {
-    url: 'http://127.0.0.1:' + address.port,
-    close: () => new Promise<void>((resolve, reject) => {
-      server.close(error => error == null ? resolve() : reject(error));
-      server.closeAllConnections();
-    })
-  };
-}
 
 describe('ServiceNow catalog hook integration', function () {
   it('registers the reusable service/config without hook-owned forms or record workflows', function () {
