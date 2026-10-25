@@ -31,10 +31,10 @@ export interface SubmitRunContext {
   dispatchStarted?: boolean;
 }
 
-export const ServiceNowConfigTag = Context.GenericTag<ServiceNowCatalogDefinition>(
+export const ServiceNowConfigTag = Context.Service<ServiceNowCatalogDefinition>(
   'servicenow-catalog/Config'
 );
 
-export const SubmitRunContextTag = Context.GenericTag<SubmitRunContext>(
+export const SubmitRunContextTag = Context.Service<SubmitRunContext>(
   'servicenow-catalog/SubmitRunContext'
 );

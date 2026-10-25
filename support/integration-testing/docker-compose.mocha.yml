@@ -23,6 +23,8 @@ services:
       context: ../..
       dockerfile: Dockerfile
       target: sails-hook-redbox-servicenow-catalog
+      args:
+        REDBOX_PORTAL_IMAGE: ${REDBOX_PORTAL_IMAGE:-qcifengineering/redbox-portal:develop}
     volumes:
       - "../../support/integration-testing:/opt/redbox-portal/support/integration-testing:ro"
       - "../../test/integration:/opt/redbox-portal/test/integration/sails-hook-redbox-servicenow-catalog"

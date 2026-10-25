@@ -58,29 +58,27 @@ describe('named ServiceNow catalog configuration', function () {
       .to.have.property('requestFilters');
   });
 
-  it('expands concrete secret paths for named catalogs and keeps temporary legacy paths', function () {
-    const model = {
-      enabled: true,
-      catalogs: {
-        'storage-new': createDefaultCatalogDefinition(),
-        'catalog.with.dot': createDefaultCatalogDefinition()
-      }
-    };
-    const adapted = SERVICENOW_CATALOG_CONFIG_MODEL.formAdapter.toForm(model);
+  it('declares all named-catalog secrets as static core wildcard paths', function () {
+    expect(SERVICENOW_CATALOG_CONFIG_MODEL.secretFields).to.deep.equal([
+      'catalogs.*.connection.headers.Authorization',
+      'catalogs.*.oauth.clientSecret',
+      'catalogs.*.oauth.password',
+      'catalogs.*.oauth.refreshToken',
+      'connection.headers.Authorization',
+      'oauth.clientSecret',
+      'oauth.password',
+      'oauth.refreshToken'
+    ]);
+    expect(SERVICENOW_CATALOG_CONFIG_MODEL).not.to.have.property('formAdapter');
+  });
 
-    expect(adapted).to.equal(model);
+  it('keeps secret declarations for the supported temporary single-catalog shape', function () {
     expect(SERVICENOW_CATALOG_CONFIG_MODEL.secretFields).to.include.members([
-      'catalogs["storage-new"].connection.headers.Authorization',
-      'catalogs["storage-new"].oauth.clientSecret',
-      'catalogs["storage-new"].oauth.password',
-      'catalogs["storage-new"].oauth.refreshToken',
-      'catalogs["catalog.with.dot"].oauth.clientSecret',
+      'connection.headers.Authorization',
+      'oauth.password',
+      'oauth.refreshToken',
       'oauth.clientSecret'
     ]);
-
-    const beforeSave = SERVICENOW_CATALOG_CONFIG_MODEL.secretFields.length;
-    SERVICENOW_CATALOG_CONFIG_MODEL.formAdapter.fromForm(model);
-    expect(SERVICENOW_CATALOG_CONFIG_MODEL.secretFields).to.have.length(beforeSave);
   });
 
   it('normalizes a temporary single-catalog config under the default name with a warning', function () {

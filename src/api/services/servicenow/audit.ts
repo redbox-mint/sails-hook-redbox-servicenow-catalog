@@ -210,7 +210,7 @@ export function withIntegrationAudit<A, E, R>(
           Effect.sync(() => {
             if (Exit.isSuccess(exit)) {
               completeCatalogAudit(ctx, safeAuditDetails(options.onSuccess, exit.value));
-            } else if (Exit.isInterrupted(exit)) {
+            } else if (Cause.hasInterrupts(exit.cause)) {
               failCatalogAudit(ctx, 'interrupted', {
                 message: `ServiceNow catalog step '${action}' was interrupted before completion.`,
                 requestSummary: { submissionCertainty: 'uncertain' }

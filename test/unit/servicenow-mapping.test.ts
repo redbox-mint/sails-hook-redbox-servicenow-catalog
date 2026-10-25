@@ -156,7 +156,7 @@ describe('ServiceNow value-binding mappings', function () {
 
     expect(Exit.isFailure(exit)).to.equal(true);
     if (Exit.isFailure(exit)) {
-      const failure = Cause.failureOption(exit.cause);
+      const failure = Cause.findErrorOption(exit.cause);
       expect(failure._tag).to.equal('Some');
       if (failure._tag === 'Some') {
         expect(failure.value).to.include({

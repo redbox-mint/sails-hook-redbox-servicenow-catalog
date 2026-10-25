@@ -10,6 +10,8 @@ services:
       context: ../..
       dockerfile: Dockerfile
       target: sails-hook-redbox-servicenow-catalog
+      args:
+        REDBOX_PORTAL_IMAGE: ${REDBOX_PORTAL_IMAGE:-qcifengineering/redbox-portal:develop}
     depends_on:
       mongodb:
         condition: service_healthy

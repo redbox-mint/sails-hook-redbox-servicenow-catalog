@@ -326,45 +326,22 @@ export const SERVICENOW_CATALOG_SCHEMA = {
 
 export const SERVICENOW_CATALOG_CONFIG_KEY = 'servicenowCatalog';
 
-const NAMED_CATALOG_SECRET_SUFFIXES = [
-  'connection.headers.Authorization',
-  'oauth.clientSecret',
-  'oauth.password',
-  'oauth.refreshToken'
-] as const;
-
 /**
- * AppConfigService currently resolves lodash paths literally and does not
- * expand wildcard map keys. Keep one mutable path list and let its form adapter
- * add concrete, safely quoted catalog paths before core masks or merges them.
+ * Core expands each wildcard to one literal catalog key, including dots and
+ * other punctuation, for masking, placeholder merging and secret storage.
+ * Retain top-level paths for the deprecated single-catalog shape accepted by
+ * normalizeServiceNowCatalogConfig.
  */
 export const SERVICENOW_CATALOG_SECRET_FIELDS = [
+  'catalogs.*.connection.headers.Authorization',
+  'catalogs.*.oauth.clientSecret',
+  'catalogs.*.oauth.password',
+  'catalogs.*.oauth.refreshToken',
   'connection.headers.Authorization',
   'oauth.clientSecret',
   'oauth.password',
   'oauth.refreshToken'
 ];
-
-export function registerServiceNowCatalogSecretFields(model: unknown): unknown {
-  if (model == null || typeof model !== 'object' || Array.isArray(model)) {
-    return model;
-  }
-  const catalogs = Reflect.get(model, 'catalogs');
-  if (catalogs == null || typeof catalogs !== 'object' || Array.isArray(catalogs)) {
-    return model;
-  }
-
-  for (const catalogName of Object.keys(catalogs)) {
-    const catalogPath = 'catalogs[' + JSON.stringify(catalogName) + ']';
-    for (const suffix of NAMED_CATALOG_SECRET_SUFFIXES) {
-      const fieldPath = catalogPath + '.' + suffix;
-      if (!SERVICENOW_CATALOG_SECRET_FIELDS.includes(fieldPath)) {
-        SERVICENOW_CATALOG_SECRET_FIELDS.push(fieldPath);
-      }
-    }
-  }
-  return model;
-}
 
 export const SERVICENOW_CATALOG_CONFIG_MODEL = {
   key: SERVICENOW_CATALOG_CONFIG_KEY,
@@ -372,9 +349,5 @@ export const SERVICENOW_CATALOG_CONFIG_MODEL = {
   title: 'ServiceNow Catalog',
   class: ServiceNowCatalogAppConfig,
   schema: SERVICENOW_CATALOG_SCHEMA,
-  secretFields: SERVICENOW_CATALOG_SECRET_FIELDS,
-  formAdapter: {
-    toForm: registerServiceNowCatalogSecretFields,
-    fromForm: registerServiceNowCatalogSecretFields
-  }
+  secretFields: SERVICENOW_CATALOG_SECRET_FIELDS
 };

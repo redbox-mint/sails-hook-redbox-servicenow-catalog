@@ -748,6 +748,48 @@ describe('ServiceNow catalog orchestration', function () {
     })).to.equal(true);
   });
 
+  it('concludes the total timeout as uncertain and blocks replay', async function () {
+    let requests = 0;
+    const testServer = await listen(async () => { requests += 1; });
+    activeServer = testServer.server;
+    const config = createDefaultCatalogDefinition();
+    config.connection.url = testServer.url;
+    config.connection.timeoutMs = 1000;
+    config.connection.totalTimeoutMs = 100;
+    config.idempotency = { enabled: true };
+    configureBrandAndCatalog(config);
+    const audit = makeAuditService();
+    setHookTestGlobal('IntegrationAuditService', audit);
+    const updates: Record<string, unknown>[] = [];
+    setHookTestGlobal('RecordsService', {
+      updateMeta: async (_brand: unknown, _oid: string, record: Record<string, unknown>) => {
+        updates.push(record);
+        return { status: true };
+      }
+    });
+
+    const result = await service.submitRequest(
+      'workspace-total-timeout', workspace(),
+      { catalog: 'storage-new', event: 'create', idempotencyKey: 'total-timeout-key' },
+      undefined, successResponse()
+    );
+    const replay = await service.submitRequest(
+      'workspace-total-timeout', workspace(),
+      { catalog: 'storage-new', event: 'create', idempotencyKey: 'total-timeout-key' },
+      undefined, {}
+    );
+
+    expect(result).to.include({ code: '504', status: false, success: false });
+    expect(replay).to.include({ code: '409', status: false });
+    expect(requests).to.equal(1);
+    expect(updates[0]).to.have.nested.property('metadata.servicenow_status', 'Uncertain');
+    expect(audit.failAudit.mock.calls.some(call => {
+      const error = call.arguments[1];
+      return error instanceof Error && Reflect.get(error, '_tag') === 'CatalogTimeoutError'
+        && Reflect.get(error, 'phase') === 'orchestration';
+    })).to.equal(true);
+  });
+
   it('reclaims an expired crash-before-submission claim after a clear audit reconciliation', async function () {
     let requests = 0;
     const testServer = await listen(async (_req, res) => {

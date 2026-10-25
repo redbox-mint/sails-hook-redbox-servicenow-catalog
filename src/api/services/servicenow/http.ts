@@ -26,7 +26,7 @@ export interface ServiceNowClient {
   submitCatalogOrder(body: Record<string, unknown>): Effect.Effect<ServiceNowHttpResult, ServiceNowClientError>;
 }
 
-export const ServiceNowClientTag = Context.GenericTag<ServiceNowClient>('servicenow-catalog/Client');
+export const ServiceNowClientTag = Context.Service<ServiceNowClient>('servicenow-catalog/Client');
 
 function oauthRequestParams(oid: string, oauth: ServiceNowOAuthConfig): Effect.Effect<URLSearchParams, OAuthTokenError> {
   return Effect.suspend(() => {
@@ -99,9 +99,9 @@ function fetchOAuthToken(
     }
     return accessToken;
   }).pipe(
-    Effect.timeoutFail({
+    Effect.timeoutOrElse({
       duration: Duration.millis(config.connection.timeoutMs),
-      onTimeout: () => new CatalogTimeoutError({ oid, timeoutMs: config.connection.timeoutMs, phase: 'request' })
+      orElse: () => Effect.fail(new CatalogTimeoutError({ oid, timeoutMs: config.connection.timeoutMs, phase: 'request' }))
     }),
     Effect.withSpan('servicenow.http.oauthToken', {
       attributes: { oid, grantType: config.oauth.grantType }
@@ -132,13 +132,15 @@ function isRetryable(error: ServiceNowClientError): boolean {
 
 function retryPolicy(config: ServiceNowCatalogDefinition) {
   const retry = config.connection.retry;
-  // Exponential backoff capped at maxDelayMs (union takes the smaller delay),
-  // jittered to avoid thundering herds, bounded by maxAttempts - 1 retries.
-  return Schedule.exponential(Duration.millis(retry.baseDelayMs), 2).pipe(
-    Schedule.either(Schedule.spaced(Duration.millis(retry.maxDelayMs))),
-    Schedule.jittered,
-    Schedule.intersect(Schedule.recurs(Math.max(0, retry.maxAttempts - 1)))
-  );
+  // Choose the smaller delay to cap exponential backoff, then jitter it.
+  // Recur only while the attempt limit also allows another request.
+  return Schedule.max([
+    Schedule.min([
+      Schedule.exponential(Duration.millis(retry.baseDelayMs), 2),
+      Schedule.spaced(Duration.millis(retry.maxDelayMs))
+    ]).pipe(Schedule.jittered),
+    Schedule.recurs(Math.max(0, retry.maxAttempts - 1))
+  ]);
 }
 
 export function makeLiveClient(
@@ -181,9 +183,9 @@ export function makeLiveClient(
         statusCode: response.status,
         data: normalizeServiceNowResponse(response.data, config)
       })),
-      Effect.timeoutFail({
+      Effect.timeoutOrElse({
         duration: Duration.millis(config.connection.timeoutMs),
-        onTimeout: () => new CatalogTimeoutError({ oid, timeoutMs: config.connection.timeoutMs, phase: 'request' })
+        orElse: () => Effect.fail(new CatalogTimeoutError({ oid, timeoutMs: config.connection.timeoutMs, phase: 'request' }))
       }),
       Effect.withSpan('servicenow.http.orderCatalogItem', {
         attributes: {

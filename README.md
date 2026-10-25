@@ -9,6 +9,22 @@ opt-in idempotency.
 The hook does not register a `servicenow-catalog` record type, workspace type,
 workflow, form, Angular application, view, or navigation entry.
 
+## Runtime compatibility
+
+This hook requires an Effect-4 ReDBox core (develop after portal #4918),
+Node.js 24 or newer, and a host-provided `effect` satisfying `^4.0.4`.
+Effect is a peer dependency so the hook shares the portal's runtime; the exact
+`4.0.4` development dependency is used for compilation and unit tests.
+
+The core peer range `>=5.1.0-beta.0 <6.0.0` identifies the supported core line,
+but cannot identify the Effect migration: the published `5.1.0-beta.12573`
+core still uses Effect 3. That core and older portal images are not supported
+by this port. Installing a separate Effect 4 beside an Effect-3 core is not a
+supported compatibility mode. Until an Effect-4 core beta is published, use a
+portal develop image containing the migrated core. Some develop images report
+an internal core version that requires `--legacy-peer-deps` when installing
+the hook tarball; verify the host's actual Effect version as well.
+
 ## Configuration
 
 `servicenowCatalog` is brand-aware and disabled by default. It contains any
@@ -120,6 +136,25 @@ emits a deprecation warning.
 The application-configuration model declares the Authorization header, OAuth
 client secret, password, and refresh token as secrets. Do not put credentials
 in mappings, audit summaries, source control, or trigger options.
+
+Secret fields use core's static `catalogs.*` wildcard paths. A wildcard matches
+one literal catalog name, including hyphens, dots and brackets (for example,
+`storage-request` or `storage.request[1]`). The deprecated single-catalog shape
+also retains its secret declarations. This requires the wildcard-aware
+AppConfigService introduced by redbox-portal commit `d6b9ad357` (#4900).
+
+Saving `__REDACTED__` preserves an existing stored secret; with no existing
+secret it omits the field so hook/environment defaults can apply. To remove a
+stored override explicitly, submit core's `__CLEAR_SECRET__` marker.
+
+An affected build using the old bracket-path declarations with this core may
+have stored `__REDACTED__` over real per-catalog credentials or exposed stored
+credentials in the admin form. This fix cannot recover overwritten values.
+Before reusing an affected installation, inspect stored per-catalog fields for
+that literal placeholder without logging credentials. Restore the real value
+from an authoritative source, or explicitly clear the override to restore an
+environment fallback. Rotate credentials that may have been exposed. No
+automatic migration deletes placeholder values.
 
 ### OAuth
 
@@ -280,6 +315,10 @@ npm run test:unit
 npm run test:integration:mocha
 npm run test:integration:bruno
 ```
+
+Set `REDBOX_PORTAL_IMAGE` to select the portal image for both integration suites
+(for example `qcifengineering/redbox-portal:develop-pdfgen-20261022`). Use a unique
+`COMPOSE_PROJECT_NAME` for isolated runs.
 
 The integration suites build and lift a real ReDBox portal with MongoDB and
 Solr. Mocha covers the service orchestration and Bruno covers authorization for

@@ -37,6 +37,8 @@ async function listen(
 describe('ServiceNow catalog hook integration', function () {
   it('registers the reusable service/config without hook-owned forms or record workflows', function () {
     expect(sails.services.servicenowcatalogservice).to.exist;
+    const service = sails.services.servicenowcatalogservice as ServicenowCatalogService;
+    expect(service.supportsDispatchClaims()).to.equal(true);
 
     const hookModule = require('@researchdatabox/sails-hook-redbox-servicenow-catalog') as HookModule;
     expect(hookModule.registerRedboxModels()).to.have.keys(['ServicenowCatalogIdempotency', 'ServicenowCatalogResourceClaim']);

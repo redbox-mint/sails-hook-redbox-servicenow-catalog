@@ -1,4 +1,4 @@
-import { Layer, Logger, LogLevel } from 'effect';
+import { Layer, Logger, References } from 'effect';
 import type { ServiceNowCatalogDefinition } from '../../configmodels/ServiceNowCatalogAppConfig';
 import { ServiceNowConfigTag, SubmitRunContextTag, type SubmitRunContext } from './context';
 import { makeClientLayer, type ServiceNowClient } from './http';
@@ -12,23 +12,23 @@ type SailsLogShape = {
  * Sails logger so the runtime has exactly one log stream instead of a
  * decorative side-channel.
  */
-const sailsLogger = Logger.make(({ logLevel, message, annotations }) => {
+const sailsLogger = Logger.make(({ logLevel, message, fiber }) => {
   const sailsInstance = (globalThis as { sails?: SailsLogShape }).sails;
   const log = sailsInstance?.log;
   if (log == null) {
     return;
   }
-  const annotationEntries = Array.from(annotations).map(([key, value]) => `${key}=${String(value)}`);
+  const annotationEntries = Object.entries(fiber.getRef(References.CurrentLogAnnotations)).map(([key, value]) => `${key}=${String(value)}`);
   const text = [
     ...(Array.isArray(message) ? message.map(String) : [String(message)]),
     ...(annotationEntries.length > 0 ? [`[${annotationEntries.join(' ')}]`] : [])
   ].join(' ');
 
-  if (logLevel === LogLevel.Fatal || logLevel === LogLevel.Error) {
+  if (logLevel === 'Fatal' || logLevel === 'Error') {
     log.error?.(text);
-  } else if (logLevel === LogLevel.Warning) {
+  } else if (logLevel === 'Warn') {
     log.warn?.(text);
-  } else if (logLevel === LogLevel.Debug || logLevel === LogLevel.Trace) {
+  } else if (logLevel === 'Debug' || logLevel === 'Trace') {
     log.debug?.(text);
   } else if (log.verbose) {
     log.verbose(text);
@@ -37,7 +37,7 @@ const sailsLogger = Logger.make(({ logLevel, message, annotations }) => {
   }
 });
 
-export const sailsLoggerLayer = Logger.replace(Logger.defaultLogger, sailsLogger);
+export const sailsLoggerLayer = Logger.layer([sailsLogger, Logger.tracerLogger]);
 
 export type ServiceNowRuntimeServices = ServiceNowCatalogDefinition | SubmitRunContext | ServiceNowClient;
 

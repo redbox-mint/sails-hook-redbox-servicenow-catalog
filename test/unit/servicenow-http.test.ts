@@ -3,7 +3,9 @@ import type { ServiceNowCatalogDefinition } from '../../src/api/configmodels/Ser
 import type { SubmitRunContext } from '../../src/api/services/servicenow/context';
 
 const http = require('node:http') as typeof import('node:http');
-const { Cause, Effect, Exit } = require('effect') as typeof import('effect');
+const axios = require('axios') as typeof import('axios').default;
+const { Cause, Effect, Exit, Fiber, Random } = require('effect') as typeof import('effect');
+const { TestClock } = require('effect/testing') as typeof import('effect/testing');
 const { expect } = require('@researchdatabox/redbox-dev-tools/testing') as { expect: Chai.ExpectStatic };
 const { createDefaultCatalogDefinition } = require(
   '../../dist/api/configmodels/ServiceNowCatalogAppConfig.js'
@@ -87,7 +89,7 @@ describe('ServiceNow Effect HTTP client', function () {
     expect(normalizeServiceNowResponse('{"result":{}}', config)).to.equal('{"result":{}}');
   });
 
-  it('retries configured transient statuses with bounded exponential scheduling', async function () {
+  it('retries configured transient statuses until a request succeeds', async function () {
     let attempts = 0;
     const testServer = await listen((_req, res) => {
       attempts += 1;
@@ -112,6 +114,135 @@ describe('ServiceNow Effect HTTP client', function () {
     });
   });
 
+  for (const maxAttempts of [6, 1]) {
+    it(`caps exponential backoff before jitter and stops after ${maxAttempts} attempt(s)`, async function () {
+      const config = configFor('http://servicenow.test/catalog');
+      config.connection.timeoutMs = 60_000;
+      config.connection.retry = {
+        maxAttempts,
+        baseDelayMs: 100,
+        maxDelayMs: 1000,
+        retryOnStatusCodes: [503]
+      };
+      const requestTimes: number[] = [];
+      // Exercise jitter below and above 1, including above the pre-jitter cap.
+      const randomValues = [0, 0.25, 0.75, 0.125, 0.875];
+      let randomIndex = 0;
+      const originalAdapter = axios.defaults.adapter;
+      try {
+        const exit = await Effect.runPromise(Effect.gen(function* () {
+          const clock = yield* TestClock.testClockWith(Effect.succeed);
+          axios.defaults.adapter = async request => {
+            requestTimes.push(clock.currentTimeMillisUnsafe());
+            return { status: 503, statusText: 'Unavailable', data: {}, headers: {}, config: request };
+          };
+          const fiber = yield* makeLiveClient(config, runContext()).submitCatalogOrder({}).pipe(
+            Effect.forkChild
+          );
+          yield* TestClock.adjust('10 seconds');
+          return yield* Fiber.await(fiber);
+        }).pipe(
+          Effect.provide(TestClock.layer()),
+          Effect.provideService(Random.Random, {
+            nextIntUnsafe: () => { throw new Error('Unexpected integer random draw'); },
+            nextDoubleUnsafe: () => randomValues[randomIndex++ % randomValues.length]
+          })
+        ));
+
+        expect(requestTimes).to.have.length(maxAttempts);
+        const delays = requestTimes.slice(1).map((time, i) => time - requestTimes[i]);
+        const unjittered = [100, 200, 400, 800, 1000].slice(0, maxAttempts - 1);
+        expect(delays).to.have.length(maxAttempts - 1);
+        for (const [i, delay] of delays.entries()) {
+          // effect/src/Schedule.ts: jittered scales each capped delay by [0.8, 1.2).
+          expect(delay).to.be.within(unjittered[i] * 0.8, unjittered[i] * 1.2);
+          expect(delay).to.be.closeTo(unjittered[i] * (0.8 + 0.4 * randomValues[i]), 1e-6);
+        }
+        expect(Exit.isFailure(exit)).to.equal(true);
+        if (Exit.isFailure(exit)) {
+          const failure = Cause.findErrorOption(exit.cause);
+          expect(failure._tag).to.equal('Some');
+          if (failure._tag === 'Some') {
+            expect(failure.value).to.include({ _tag: 'CatalogRequestError', statusCode: 503, retryable: true });
+          }
+        }
+      } finally {
+        axios.defaults.adapter = originalAdapter;
+      }
+    });
+  }
+
+  it('stops retrying transient failures at maxAttempts and preserves the tagged error', async function () {
+    let attempts = 0;
+    const testServer = await listen((_req, res) => {
+      attempts += 1;
+      res.statusCode = 503;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ error: 'still unavailable' }));
+    });
+    activeServer = testServer.server;
+    const client = makeLiveClient(configFor(testServer.url), runContext());
+    const exit = await Effect.runPromiseExit(client.submitCatalogOrder({}));
+
+    expect(attempts).to.equal(3);
+    expect(Exit.isFailure(exit)).to.equal(true);
+    if (Exit.isFailure(exit)) {
+      const failure = Cause.findErrorOption(exit.cause);
+      expect(failure._tag).to.equal('Some');
+      if (failure._tag === 'Some') {
+        expect(failure.value).to.include({ _tag: 'CatalogRequestError', statusCode: 503, retryable: true });
+      }
+    }
+  });
+
+  it('does not retry an OAuth rejection or dispatch a catalog order', async function () {
+    const paths: Array<string | undefined> = [];
+    const testServer = await listen((req, res) => {
+      paths.push(req.url);
+      res.statusCode = 401;
+      res.end('{}');
+    });
+    activeServer = testServer.server;
+    const config = configFor(testServer.url + '/catalog');
+    config.oauth = {
+      enabled: true, url: testServer.url + '/oauth',
+      clientId: 'client', clientSecret: 'secret', grantType: 'client_credentials'
+    };
+    const exit = await Effect.runPromiseExit(makeLiveClient(config, runContext()).submitCatalogOrder({}));
+
+    expect(paths).to.deep.equal(['/oauth']);
+    expect(Exit.isFailure(exit)).to.equal(true);
+    if (Exit.isFailure(exit)) {
+      const failure = Cause.findErrorOption(exit.cause);
+      expect(failure._tag).to.equal('Some');
+      if (failure._tag === 'Some') {
+        expect(failure.value).to.include({ _tag: 'OAuthTokenError', statusCode: 401 });
+      }
+    }
+  });
+
+  it('retries a per-attempt timeout and aborts the timed-out HTTP request', async function () {
+    let attempts = 0;
+    let closed: (() => void) | undefined;
+    const firstClosed = new Promise<void>(resolve => { closed = resolve; });
+    const testServer = await listen((_req, res) => {
+      attempts += 1;
+      if (attempts === 1) {
+        res.on('close', () => closed?.());
+        return;
+      }
+      res.end('{}');
+    });
+    activeServer = testServer.server;
+    const config = configFor(testServer.url);
+    config.connection.timeoutMs = 50;
+    const result = await Effect.runPromise(makeLiveClient(config, runContext()).submitCatalogOrder({}));
+    await firstClosed;
+
+    expect(attempts).to.equal(2);
+    expect(result.statusCode).to.equal(200);
+  });
+
   it('does not retry a non-transient response status', async function () {
     let attempts = 0;
     const testServer = await listen((_req, res) => {
@@ -128,7 +259,7 @@ describe('ServiceNow Effect HTTP client', function () {
     expect(attempts).to.equal(1);
     expect(Exit.isFailure(exit)).to.equal(true);
     if (Exit.isFailure(exit)) {
-      const failure = Cause.failureOption(exit.cause);
+      const failure = Cause.findErrorOption(exit.cause);
       expect(failure._tag).to.equal('Some');
       if (failure._tag === 'Some') {
         expect(failure.value).to.include({
@@ -199,7 +330,11 @@ describe('ServiceNow Effect HTTP client', function () {
 
     expect(Exit.isFailure(exit)).to.equal(true);
     if (Exit.isFailure(exit)) {
-      expect(exit.cause.toString()).to.contain('CatalogTimeoutError');
+      const failure = Cause.findErrorOption(exit.cause);
+      expect(failure._tag).to.equal('Some');
+      if (failure._tag === 'Some') {
+        expect(failure.value).to.include({ _tag: 'CatalogTimeoutError', phase: 'request', timeoutMs: 10 });
+      }
     }
   });
 });

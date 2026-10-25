@@ -100,7 +100,7 @@ export namespace Services {
       'supportsDispatchClaims'
     ];
 
-    private readonly inFlight = new Set<Fiber.RuntimeFiber<ServiceNowHttpResult, ServiceNowCatalogError>>();
+    private readonly inFlight = new Set<Fiber.Fiber<ServiceNowHttpResult, ServiceNowCatalogError>>();
     private readonly inFlightIdempotency = new Set<string>();
     private legacyConfigWarningEmitted = false;
 
@@ -315,13 +315,13 @@ export namespace Services {
       };
 
       const program = this.submitProgram(workspaceData, brand).pipe(
-        Effect.timeoutFail({
+        Effect.timeoutOrElse({
           duration: Duration.millis(config.connection.totalTimeoutMs),
-          onTimeout: () => new CatalogTimeoutError({
+          orElse: () => Effect.fail(new CatalogTimeoutError({
             oid,
             timeoutMs: config.connection.totalTimeoutMs,
             phase: 'orchestration'
-          })
+          }))
         }),
         Effect.withSpan('servicenow.submitRequest', {
           attributes: {
@@ -409,7 +409,7 @@ export namespace Services {
       ServiceNowCatalogError,
       ServiceNowCatalogDefinition | SubmitRunContext | import('./servicenow/http').ServiceNowClient
     > {
-      return Effect.gen(this, function* (this: ServicenowCatalog) {
+      return Effect.gen({ self: this }, function* (this: ServicenowCatalog) {
         const runContext = yield* SubmitRunContextTag;
         const config = yield* ServiceNowConfigTag;
         const client = yield* ServiceNowClientTag;
@@ -589,7 +589,7 @@ export namespace Services {
         return response;
       }
 
-      if (Exit.isInterrupted(exit)) {
+      if (Cause.hasInterrupts(exit.cause)) {
         failCatalogAudit(runContext.parentAudit, 'interrupted', {
           message: 'ServiceNow catalog request was interrupted during shutdown.',
           requestSummary: {
@@ -610,7 +610,7 @@ export namespace Services {
         return this.fail(response, '503', 'ServiceNow catalog request for ' + oid + ' was interrupted during shutdown.');
       }
 
-      const failure = Cause.failureOption(exit.cause);
+      const failure = Cause.findErrorOption(exit.cause);
       if (failure._tag === 'Some') {
         const error = failure.value;
         const message = errorDescription(error);
@@ -1052,7 +1052,7 @@ export namespace Services {
       if (Exit.isSuccess(exit)) {
         return { value: this.optionalText(exit.value) };
       }
-      const failure = Cause.failureOption(exit.cause);
+      const failure = Cause.findErrorOption(exit.cause);
       return {
         error: failure._tag === 'Some'
           ? failure.value
