@@ -1,5 +1,17 @@
 import { Data } from 'effect';
 
+/** Public submission failure. Messages follow the orchestration's redacted diagnostics. */
+export class ServiceNowSubmissionError extends Error {
+  public override readonly name = 'ServiceNowSubmissionError';
+  constructor(
+    public readonly oid: string,
+    public readonly code: string,
+    public readonly uncertain: boolean,
+    message: string,
+    public readonly tag?: string
+  ) { super(message); }
+}
+
 /** Typed failure channel for the ServiceNow catalog orchestration. */
 
 export class ServiceNowConfigError extends Data.TaggedError('ServiceNowConfigError')<{
@@ -182,7 +194,7 @@ export function errorResponseSummary(error: ServiceNowCatalogError): Record<stri
   return { value: summarized };
 }
 
-/** A short actionable detail for logs and the trigger response. */
+/** A short actionable detail for logs and submission errors. */
 export function errorResponseMessage(error: ServiceNowCatalogError): string | undefined {
   const summary = errorResponseSummary(error);
   if (summary == null) {
@@ -205,7 +217,7 @@ export function errorResponseMessage(error: ServiceNowCatalogError): string | un
     : serialized;
 }
 
-/** HTTP-style code reported back on the trigger response for each failure kind. */
+/** HTTP-style code carried by the submission error for each failure kind. */
 export function errorHttpCode(error: ServiceNowCatalogError): string {
   switch (error._tag) {
     case 'ServiceNowConfigError':

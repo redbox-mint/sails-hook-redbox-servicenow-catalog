@@ -1,5 +1,8 @@
 import { acquireResources, resourceKeys, transitionResources, releaseReserved, requestResources, releaseRevertedResources, ResourceOccupiedError } from './servicenow/resource-claims';
 import { Services as CoreServices } from '@researchdatabox/redbox-core';
+import { isRecordRevision } from '@researchdatabox/sails-ng-common';
+import { ServiceNowSubmissionError } from './servicenow/errors';
+export { ServiceNowSubmissionError } from './servicenow/errors';
 import { Cause, Duration, Effect, Exit, Fiber } from 'effect';
 import {
   SERVICENOW_CATALOG_CONFIG_KEY,
@@ -50,13 +53,21 @@ import {
   concludeCatalogIdempotency,
   type CatalogIdempotencyClaim
 } from './servicenow/idempotency';
-import { applyRequestCrosswalk, applyFieldMappings, evaluateBinding } from './servicenow/mapping';
+import { applyRequestCrosswalk, applyFieldMappings, evaluateBinding, getPath, setPath } from './servicenow/mapping';
 import { makeRuntimeLayer } from './servicenow/runtime';
 
 export interface WorkspaceRecord {
+  revision?: number;
   metadata: Record<string, unknown>;
   metaMetadata?: { brandId?: string; [key: string]: unknown };
   [key: string]: unknown;
+}
+
+/** Validate identity and consistency before exposing a post-write storage read. */
+function isStoredWorkspaceRecord(value: unknown, oid: string, brandId: string | undefined): value is WorkspaceRecord {
+  return isPlainObject(value) && isPlainObject(value.metadata)
+    && isRecordRevision(value.revision) && value.redboxOid === oid
+    && isPlainObject(value.metaMetadata) && value.metaMetadata.brandId === brandId;
 }
 
 export interface TriggerResponse {
@@ -65,6 +76,11 @@ export interface TriggerResponse {
   success?: boolean;
   message?: string;
   [key: string]: unknown;
+}
+
+interface SubmitSuccess {
+  httpResult: ServiceNowHttpResult;
+  committed: WorkspaceRecord;
 }
 
 interface ResolvedBrand {
@@ -97,14 +113,17 @@ export namespace Services {
       'submitRequest',
       'remapData',
       'releaseRequestClaims',
-      'supportsDispatchClaims'
+      'supportsDispatchClaims',
+      'returnsCommittedRecord'
     ];
 
-    private readonly inFlight = new Set<Fiber.Fiber<ServiceNowHttpResult, ServiceNowCatalogError>>();
+    private readonly inFlight = new Set<Fiber.Fiber<SubmitSuccess, ServiceNowCatalogError>>();
     private readonly inFlightIdempotency = new Set<string>();
     private legacyConfigWarningEmitted = false;
 
     public supportsDispatchClaims(): boolean { return true; }
+
+    public returnsCommittedRecord(): boolean { return true; }
 
     public init(): void {
       this.registerSailsHook('on', 'ready', () => this.registerOutcomeMapper());
@@ -115,14 +134,13 @@ export namespace Services {
       oid: string,
       workspaceData: WorkspaceRecord,
       options: ServiceNowTriggerOptions,
-      user: { username?: string } | undefined,
-      response: TriggerResponse
-    ): Promise<TriggerResponse> {
+      user: { username?: string } | undefined
+    ): Promise<WorkspaceRecord> {
       this.logger.verbose('ServiceNow catalog processing request for ' + oid + '.');
 
       const trigger = this.validateTriggerOptions(oid, options);
       if (trigger instanceof ServiceNowConfigError) {
-        return this.failBeforeSubmission(response, trigger, {
+        return this.failBeforeSubmission(trigger, {
           catalog: isPlainObject(options) ? options.catalog : undefined,
           event: isPlainObject(options) ? options.event : undefined
         }, undefined, user?.username);
@@ -130,7 +148,7 @@ export namespace Services {
 
       const resolvedBrand = this.resolveBrand(oid, workspaceData);
       if (resolvedBrand instanceof ServiceNowConfigError) {
-        return this.failBeforeSubmission(response, resolvedBrand, {
+        return this.failBeforeSubmission(resolvedBrand, {
           catalog: trigger.catalog,
           event: trigger.event
         }, undefined, user?.username);
@@ -138,7 +156,7 @@ export namespace Services {
       const { brandId, brandName, brand } = resolvedBrand;
       const resolved = this.resolveConfig(brandName, trigger.catalog);
       if (typeof resolved.integrationEnabled !== 'boolean') {
-        return this.failBeforeSubmission(response, new ServiceNowConfigError({
+        return this.failBeforeSubmission(new ServiceNowConfigError({
           oid,
           reason: 'ServiceNow Catalog enabled configuration must be a boolean.'
         }), {
@@ -151,11 +169,11 @@ export namespace Services {
         this.logger.verbose(
           "ServiceNow catalog integration is disabled for brand '" + brandName + "'; skipping " + oid + '.'
         );
-        return response;
+        return workspaceData;
       }
       if (resolved.catalog == null) {
         const error = new UnknownCatalogError({ oid, catalog: trigger.catalog });
-        return this.failBeforeSubmission(response, error, {
+        return this.failBeforeSubmission(error, {
           catalog: trigger.catalog,
           event: trigger.event,
           brandName
@@ -163,7 +181,7 @@ export namespace Services {
       }
       const config = resolved.catalog;
       if (typeof config.enabled !== 'boolean') {
-        return this.failBeforeSubmission(response, new ServiceNowConfigError({
+        return this.failBeforeSubmission(new ServiceNowConfigError({
           oid,
           reason: "ServiceNow catalog '" + trigger.catalog + "' enabled configuration must be a boolean."
         }), {
@@ -176,12 +194,12 @@ export namespace Services {
         this.logger.verbose(
           "ServiceNow catalog '" + trigger.catalog + "' is disabled for brand '" + brandName + "'; skipping " + oid + '.'
         );
-        return response;
+        return workspaceData;
       }
 
       const configError = this.validateConfig(oid, config);
       if (configError != null) {
-        return this.failBeforeSubmission(response, configError, {
+        return this.failBeforeSubmission(configError, {
           catalog: trigger.catalog,
           event: trigger.event,
           brandName
@@ -212,7 +230,7 @@ export namespace Services {
         provisionalMappingContext
       );
       if (parentResolution.error != null) {
-        return this.failBeforeSubmission(response, parentResolution.error, {
+        return this.failBeforeSubmission(parentResolution.error, {
           catalog: trigger.catalog,
           event: trigger.event,
           brandName
@@ -227,7 +245,7 @@ export namespace Services {
         provisionalMappingContext
       );
       if (idempotencyResolution.error != null) {
-        return this.failBeforeSubmission(response, idempotencyResolution.error, {
+        return this.failBeforeSubmission(idempotencyResolution.error, {
           catalog: trigger.catalog,
           event: trigger.event,
           brandName,
@@ -244,7 +262,7 @@ export namespace Services {
             reason: "ServiceNow catalog '" + trigger.catalog + "' has idempotency enabled but no key resolved.",
             httpCode: '400'
           });
-          return this.failBeforeSubmission(response, error, {
+          return this.failBeforeSubmission(error, {
             catalog: trigger.catalog,
             event: trigger.event,
             brandName,
@@ -264,7 +282,7 @@ export namespace Services {
             idempotencyKey,
             state: 'in-progress'
           });
-          return this.failBeforeSubmission(response, duplicate, {
+          return this.failBeforeSubmission(duplicate, {
             catalog: trigger.catalog,
             event: trigger.event,
             brandName,
@@ -284,7 +302,7 @@ export namespace Services {
         );
         if (check.error != null) {
           this.inFlightIdempotency.delete(idempotencyLock);
-          return this.failBeforeSubmission(response, check.error, {
+          return this.failBeforeSubmission(check.error, {
             catalog: trigger.catalog,
             event: trigger.event,
             brandName,
@@ -336,7 +354,7 @@ export namespace Services {
 
       const fiber = Effect.runFork(program);
       this.inFlight.add(fiber);
-      let exit: Exit.Exit<ServiceNowHttpResult, ServiceNowCatalogError>;
+      let exit: Exit.Exit<SubmitSuccess, ServiceNowCatalogError>;
       try {
         exit = await Effect.runPromise(Fiber.await(fiber));
       } finally {
@@ -360,7 +378,6 @@ export namespace Services {
           brand,
           runContext,
           exit,
-          response,
           idempotencyClaim
         );
       } finally {
@@ -405,7 +422,7 @@ export namespace Services {
       workspaceData: WorkspaceRecord,
       brand: unknown
     ): Effect.Effect<
-      ServiceNowHttpResult,
+      SubmitSuccess,
       ServiceNowCatalogError,
       ServiceNowCatalogDefinition | SubmitRunContext | import('./servicenow/http').ServiceNowClient
     > {
@@ -512,15 +529,42 @@ export namespace Services {
         );
 
         const responseContext = this.mappingContext(workspaceData, parentRecord, runContext, result.data);
+        let committed = workspaceData;
         if (config.responseFields.workspace.length > 0) {
-          const updatedWorkspace = yield* applyFieldMappings(
-            oid,
-            config.responseFields.workspace,
-            responseContext,
-            workspaceData
+          const mapped = yield* applyFieldMappings(
+            oid, config.responseFields.workspace, responseContext, {}
           );
-          yield* Effect.tryPromise({
-            try: () => RecordsService.updateMeta(brand, oid, updatedWorkspace),
+          committed = yield* Effect.tryPromise({
+            try: async () => {
+              const saved = await RecordsService.mutateMetaInternal({
+                actor: { kind: 'service', id: 'ServicenowCatalogService.responseWriteBack' },
+                authorization: { kind: 'service' }, oid,
+                triggerPreSaveTriggers: false, triggerPostSaveTriggers: false,
+                retry: { idempotent: true, recomputable: true, maxAttempts: 3 },
+                mutate: fresh => {
+                  if (fresh.metaMetadata?.brandId !== workspaceData.metaMetadata?.brandId) {
+                    throw new Error('Response write-back brand mismatch.');
+                  }
+                  for (const { destination } of config.responseFields.workspace) {
+                    setPath(fresh, destination, getPath(mapped, destination));
+                  }
+                  return fresh;
+                }
+              });
+              if (saved.success !== true) {
+                throw new Error('Response write-back did not report a successful commit.');
+              }
+              // The save receipt can reflect a later reload, and core normalises
+              // the callback candidate before persisting it. Return one stored
+              // snapshot so its content and revision always describe the same state.
+              // A failed read is uncertain: the order and write-back have already
+              // committed, so the caller must reconcile instead of redispatching.
+              const stored = await RecordsService.getMeta(oid);
+              if (!isStoredWorkspaceRecord(stored, oid, workspaceData.metaMetadata?.brandId)) {
+                throw new Error('Response write-back read returned an unusable record, revision or identity.');
+              }
+              return stored;
+            },
             catch: cause => new WorkspaceUpdateError({ oid, cause })
           }).pipe(
             Effect.withSpan('servicenow.updateWorkspaceMeta', { attributes: { oid } }),
@@ -529,7 +573,7 @@ export namespace Services {
               triggeredBy: runContext.triggeredBy,
               parent: runContext.parentAudit,
               requestSummary: { catalog: runContext.catalog },
-              onSuccess: () => ({ message: 'Workspace metadata updated from the ServiceNow response.' })
+              onSuccess: () => ({ message: 'Workspace response fields committed with record hooks disabled.' })
             })
           );
         }
@@ -557,7 +601,7 @@ export namespace Services {
           );
         }
 
-        return result;
+        return { httpResult: result, committed };
       });
     }
 
@@ -566,27 +610,26 @@ export namespace Services {
       workspaceData: WorkspaceRecord,
       brand: unknown,
       runContext: SubmitRunContext,
-      exit: Exit.Exit<ServiceNowHttpResult, ServiceNowCatalogError>,
-      response: TriggerResponse,
+      exit: Exit.Exit<SubmitSuccess, ServiceNowCatalogError>,
       idempotencyClaim: CatalogIdempotencyClaim | undefined
-    ): Promise<TriggerResponse> {
+    ): Promise<WorkspaceRecord> {
       if (Exit.isSuccess(exit)) {
         completeCatalogAudit(runContext.parentAudit, {
           message: 'ServiceNow catalog request completed.',
-          httpStatusCode: exit.value.statusCode,
+          httpStatusCode: exit.value.httpResult.statusCode,
           requestSummary: {
             catalog: runContext.catalog,
             event: runContext.event,
             idempotencyKey: runContext.idempotencyKey,
             parentRecordOid: runContext.parentRecordOid
           },
-          responseSummary: isPlainObject(exit.value.data)
-            ? exit.value.data
-            : { rawResponseBody: exit.value.data }
+          responseSummary: isPlainObject(exit.value.httpResult.data)
+            ? exit.value.httpResult.data
+            : { rawResponseBody: exit.value.httpResult.data }
         });
         await this.concludeIdempotency(idempotencyClaim, 'completed');
         this.logger.verbose('ServiceNow catalog completed request for ' + oid + '.');
-        return response;
+        return exit.value.committed;
       }
 
       if (Cause.hasInterrupts(exit.cause)) {
@@ -607,7 +650,9 @@ export namespace Services {
           'Uncertain',
           runContext.parentAudit
         );
-        return this.fail(response, '503', 'ServiceNow catalog request for ' + oid + ' was interrupted during shutdown.');
+        const message = 'ServiceNow catalog request for ' + oid + ' was interrupted during shutdown.';
+        this.logger.error(message);
+        throw new ServiceNowSubmissionError(oid, '503', true, message, 'Interrupted');
       }
 
       const failure = Cause.findErrorOption(exit.cause);
@@ -637,7 +682,7 @@ export namespace Services {
           'ServiceNow catalog request failed for workspace ' + oid + ' [' + error._tag + ']: ' + message
           + this.traceSuffix(runContext.parentAudit)
         );
-        return this.fail(response, errorHttpCode(error), message);
+        throw new ServiceNowSubmissionError(oid, errorHttpCode(error), uncertain, message, error._tag);
       }
 
       const defect = Cause.squash(exit.cause);
@@ -662,7 +707,7 @@ export namespace Services {
         'ServiceNow catalog request crashed for workspace ' + oid + ': ' + causeMessage(defect)
         + this.traceSuffix(runContext.parentAudit)
       );
-      return this.fail(response, '500', 'ServiceNow catalog request failed for workspace ' + oid + '; check the server logs.');
+      throw new ServiceNowSubmissionError(oid, '500', true, 'ServiceNow catalog request failed for workspace ' + oid + '; check the server logs.', 'Defect');
     }
 
     private async persistWorkspaceSubmissionStatus(
@@ -1200,12 +1245,11 @@ export namespace Services {
     }
 
     private failBeforeSubmission(
-      response: TriggerResponse,
       error: ServiceNowCatalogError,
       requestSummary: Record<string, unknown>,
       brandId?: string,
       triggeredBy?: string
-    ): TriggerResponse {
+    ): never {
       const message = errorDescription(error);
       const audit = startCatalogAudit(error.oid, ServiceNowAuditAction.submitCatalogRequest, {
         brandId,
@@ -1213,24 +1257,16 @@ export namespace Services {
         requestSummary
       });
       failCatalogAudit(audit, error, { message, requestSummary });
-      return this.fail(response, errorHttpCode(error), message);
-    }
-
-    private fail(response: TriggerResponse, code: string, message: string): TriggerResponse {
       this.logger.error(message);
-      response.code = code;
-      response.status = false;
-      response.success = false;
-      response.message = message;
-      return response;
+      throw new ServiceNowSubmissionError(error.oid, errorHttpCode(error), false, message, error._tag);
     }
   }
 }
 
 export type ServicenowCatalogService = Pick<
   Services.ServicenowCatalog,
-  'init' | 'submitRequest' | 'remapData' | 'releaseRequestClaims' | 'supportsDispatchClaims'
+  'init' | 'submitRequest' | 'remapData' | 'releaseRequestClaims' | 'supportsDispatchClaims' | 'returnsCommittedRecord'
 >;
 export const ServicenowCatalogService = new Services.ServicenowCatalog().exports() as ServicenowCatalogService;
 
-module.exports = ServicenowCatalogService;
+module.exports = Object.assign(ServicenowCatalogService, { ServiceNowSubmissionError });

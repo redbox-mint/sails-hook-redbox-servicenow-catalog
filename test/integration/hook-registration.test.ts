@@ -1,4 +1,4 @@
-import { listen } from './helpers';
+import { listen, rejectedSubmission } from './helpers';
 import type { ServicenowCatalogService } from '../../src/api/services/ServicenowCatalogService';
 
 const { expect } = require('chai') as { expect: Chai.ExpectStatic };
@@ -17,6 +17,7 @@ describe('ServiceNow catalog hook integration', function () {
     expect(sails.services.servicenowcatalogservice).to.exist;
     const service = sails.services.servicenowcatalogservice as ServicenowCatalogService;
     expect(service.supportsDispatchClaims()).to.equal(true);
+    expect(service.returnsCommittedRecord()).to.equal(true);
 
     const hookModule = require('@researchdatabox/sails-hook-redbox-servicenow-catalog') as HookModule;
     expect(hookModule.registerRedboxModels()).to.have.keys(['ServicenowCatalogIdempotency', 'ServicenowCatalogResourceClaim']);
@@ -85,8 +86,15 @@ describe('ServiceNow catalog hook integration', function () {
         enabled: true,
         catalogs: { 'integration-success': definition }
       });
+      let stored: Record<string, unknown> | undefined;
       Reflect.set(globalThis, 'RecordsService', {
-        getMeta: async (oid: string) => ({
+        mutateMetaInternal: async (options: { oid: string; mutate: (snapshot: typeof submittedWorkspace) => unknown }) => {
+          const record = options.mutate(structuredClone(submittedWorkspace)) as Record<string, unknown>;
+          workspaceUpdates.push({ oid: options.oid, record });
+          stored = { ...structuredClone(record), redboxOid: options.oid, revision: 2 };
+          return { success: true, concurrency: { revision: 2 } };
+        },
+        getMeta: async (oid: string) => oid === auditOid ? stored : ({
           metadata: { oid, title: 'Integration parent' }
         }),
         updateMeta: async (
@@ -119,19 +127,18 @@ describe('ServiceNow catalog hook integration', function () {
         auditOid,
         submittedWorkspace,
         { catalog: 'integration-success', event: 'update', idempotencyKey: 'integration-key' },
-        { username: 'integration-test' },
-        { code: '200', status: true, success: true }
+        { username: 'integration-test' }
       );
-      const retry = await service.submitRequest(
+      const retry = await rejectedSubmission(service.submitRequest(
         auditOid,
         submittedWorkspace,
         { catalog: 'integration-success', event: 'update', idempotencyKey: 'integration-key' },
-        { username: 'integration-test' },
-        {}
-      );
+        { username: 'integration-test' }
+      ));
 
-      expect(result).to.include({ code: '200', status: true, success: true });
-      expect(retry).to.include({ code: '409', status: false, success: false });
+      expect(result).to.have.nested.property('metadata.servicenowNumber', 'REQ-INTEGRATION');
+      expect(result.revision).to.equal(2);
+      expect(retry).to.include({ code: '409', uncertain: false });
       expect(requestCount).to.equal(1);
       expect(associations).to.deep.equal([['integration-parent', auditOid]]);
       expect(workspaceUpdates).to.have.length(2);
@@ -205,15 +212,14 @@ describe('ServiceNow catalog hook integration', function () {
       };
       const originalWorkspace = structuredClone(submittedWorkspace);
       const service = sails.services.servicenowcatalogservice as ServicenowCatalogService;
-      const result = await service.submitRequest(
+      const result = await rejectedSubmission(service.submitRequest(
         'integration-workspace-does-not-persist',
         submittedWorkspace,
         { catalog: 'integration-test', event: 'create' },
-        { username: 'integration-test' },
-        {}
-      );
+        { username: 'integration-test' }
+      ));
 
-      expect(result).to.include({ code: '503', status: false, success: false });
+      expect(result).to.include({ code: '503', uncertain: false });
       expect(submittedWorkspace).to.deep.equal(originalWorkspace);
     } finally {
       Reflect.set(sails.config, 'servicenowCatalog', originalConfig);

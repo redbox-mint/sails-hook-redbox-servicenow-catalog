@@ -166,10 +166,16 @@ an Authorization header.
 
 ## Calling the service
 
-A customer-owned save hook calls the standard exported service:
+A customer-owned save hook calls the standard exported service. This is a breaking
+change: `submitRequest` accepts four arguments and returns `Promise<WorkspaceRecord>`
+instead of mutating a trigger response:
 
 ```ts
-const result = await sails.services.servicenowcatalogservice.submitRequest(
+const service = sails.services.servicenowcatalogservice;
+if (!service.returnsCommittedRecord?.()) {
+  throw new Error('Upgrade the ServiceNow catalog plugin before using this hook.');
+}
+const committed = await service.submitRequest(
   oid,
   workspaceData,
   {
@@ -180,23 +186,55 @@ const result = await sails.services.servicenowcatalogservice.submitRequest(
     // Optional when the caller has already resolved the relationship.
     parentRecordOid: workspaceData.metadata.parentOid
   },
-  req.user,
-  response
+  req.user
 );
 ```
 
 `catalog` and `event` are required. Runtime options cannot replace catalog
-URLs, credentials, body templates, retry policy, or mappings. An integration or
-catalog that is explicitly disabled returns the incoming trigger response
-unchanged. Validation, duplicate, mapping, parent, OAuth, request, timeout, and
-write-back failures return the normal structured trigger failure without
-deleting the saved workspace.
+URLs, credentials, body templates, retry policy, or mappings. Success returns the
+stored workspace record read back once after response write-back. Its content
+and `revision` describe the same stored state, including core save normalisation
+and any concurrent changes visible to that read. Only mapped destinations are
+applied to a fresh storage snapshot; concurrent changes to other fields are
+preserved. Write-back disables both pre
+and post record hooks. With no workspace response mappings, no workspace write
+or read occurs and the input `workspaceData` is returned unchanged. An explicitly
+disabled integration or catalog also returns that same input unchanged without
+saving.
+
+Failures throw `ServiceNowSubmissionError` (exported from
+`dist/api/services/servicenow/errors`, also available on the service module).
+It carries `oid`, an HTTP-style string `code`, `uncertain`, an optional failure
+`tag`, and the existing redacted diagnostic `message`. Audits, idempotency ledger
+outcomes, dispatch claim transitions and `Failed`/`Uncertain` status writes are
+completed before throwing, where applicable. Write-back failures are uncertain:
+ServiceNow may already have accepted the order, even when the local save failed.
+A failed or unusable read after a successful write-back is also uncertain: the
+order and local write have committed, but no consistent record can be returned.
+The saved workspace is retained. Reconcile uncertain outcomes before retrying.
+
+### Using inside a postSync hook
+
+Check `returnsCommittedRecord()` before relying on this contract, and **return the
+record you get back** from the hook:
+
+```ts
+return await service.submitRequest(oid, workspaceData, options, user);
+```
+
+A core containing [redbox-mint/redbox-portal#5022](https://github.com/redbox-mint/redbox-portal/pull/5022)
+verifies the returned revision against storage and adopts the returned stored
+record (which may include concurrent changes) for its chained postSync save. Without that core change, core still reports
+`record-revision-stale` even though the response fields have been saved. Let
+submission errors propagate so core reports the hook failure as `post-save-failed`.
+With no workspace response mappings the input is returned unchanged, so core
+adopts no newer committed state from this service.
 
 ## Mapping contract
 
 Request and response fields use the core `ValueBinding` model:
 
-- `path`: read a dot-notation path;
+- `path`: read a dot-notation path (brackets are literal segment characters);
 - `handlebars`: render a Handlebars template;
 - `jsonata`: evaluate a JSONata expression.
 

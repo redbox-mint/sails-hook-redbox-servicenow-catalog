@@ -1,6 +1,6 @@
 import type { ServiceNowCatalogDefinition } from '../../src/api/configmodels/ServiceNowCatalogAppConfig';
-import type { ServicenowCatalogService } from '../../src/api/services/ServicenowCatalogService';
-import { listen } from './helpers';
+import type { WorkspaceRecord, ServicenowCatalogService } from '../../src/api/services/ServicenowCatalogService';
+import { listen, rejectedSubmission } from './helpers';
 
 const { expect } = require('chai') as { expect: Chai.ExpectStatic };
 const { brotliCompressSync, gzipSync, deflateSync, constants } = require('node:zlib') as typeof import('node:zlib');
@@ -61,6 +61,7 @@ describe('ServiceNow compressed responses in the portal runtime', function () {
   let originalConfig: unknown;
   let oid: string;
   let workspace: { metadata: Record<string, unknown>; metaMetadata: { brandId: string; type: string; form: string } };
+  let seedRevision: number;
   let definition: ServiceNowCatalogDefinition;
   let mock: Awaited<ReturnType<typeof listen>> | undefined;
   let unhandled: unknown[];
@@ -94,6 +95,9 @@ describe('ServiceNow compressed responses in the portal runtime', function () {
     await portalModel('record').create({ redboxOid: oid, ...workspace, workflow: { stage: 'draft' }, authorization: {} });
     const seedSave = await RecordsService.updateMeta(BrandingService.getDefault(), oid, workspace);
     expect(seedSave.success, JSON.stringify(seedSave)).to.equal(true);
+    const revision = (await RecordsService.getMeta(oid)).revision;
+    if (typeof revision !== 'number') throw new Error('Seed save returned no revision');
+    seedRevision = revision;
     definition = createDefaultCatalogDefinition();
     definition.connection.timeoutMs = 5000;
     definition.connection.totalTimeoutMs = 10000;
@@ -120,10 +124,165 @@ describe('ServiceNow compressed responses in the portal runtime', function () {
     definition.connection.url = mock!.url + '/catalog';
     Reflect.set(sails.config, 'servicenowCatalog', { enabled: true, catalogs: { compressed: definition } });
     return (sails.services.servicenowcatalogservice as ServicenowCatalogService).submitRequest(
-      oid, workspace, { catalog: 'compressed', event: 'create' }, { username: 'integration-test' },
-      { code: '200', status: true, success: true }
-    );
+      oid, workspace, { catalog: 'compressed', event: 'create' }, { username: 'integration-test' });
   }
+
+  it('preserves a concurrent unmapped edit made during the HTTP request', async function () {
+    mock = await listen(async (req, res) => {
+      req.resume();
+      const edited = await RecordsService.mutateMetaInternal({
+        actor: { kind: 'service', id: 'ServiceNowFixture.concurrentEdit' }, authorization: { kind: 'service' }, oid,
+        triggerPreSaveTriggers: false, triggerPostSaveTriggers: false,
+        mutate: snapshot => { snapshot.metadata.concurrent = 'new value'; snapshot.metadata.title = 'Concurrent title'; return snapshot; }
+      });
+      expect(edited.success).to.equal(true);
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ result: { number: 'REQ-CONCURRENT' } }));
+    });
+    const committed = await submit();
+    const stored = await RecordsService.getMeta(oid);
+    expect(committed.metadata).to.include({ concurrent: 'new value', title: 'Concurrent title', number: 'REQ-CONCURRENT' });
+    expect(stored.metadata).to.include({ concurrent: 'new value', title: 'Concurrent title', number: 'REQ-CONCURRENT' });
+    expect(stored).to.have.property('revision', committed.revision);
+    expect(committed.revision).to.be.greaterThan(seedRevision + 1);
+  });
+
+  it('returns a consistent stored record after a concurrent edit following write-back', async function () {
+    mock = await listen((req, res) => {
+      req.resume(); res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ result: { number: 'REQ-AFTER-WRITE' } }));
+    });
+    const originalMutation = RecordsService.mutateMetaInternal;
+    let inserted = false;
+    RecordsService.mutateMetaInternal = async options => {
+      const receipt = await originalMutation(options);
+      if (options.actor.id === 'ServicenowCatalogService.responseWriteBack' && receipt.success) {
+        inserted = true;
+        const edit = await originalMutation({
+          actor: { kind: 'service', id: 'ServiceNowFixture.afterWrite' }, authorization: { kind: 'service' }, oid,
+          triggerPreSaveTriggers: false, triggerPostSaveTriggers: false,
+          mutate: snapshot => { snapshot.metadata.title = 'Edited after write-back'; snapshot.metadata.concurrent = 'preserved'; return snapshot; }
+        });
+        expect(edit.success, JSON.stringify(edit)).to.equal(true);
+      }
+      return receipt;
+    };
+    try {
+      const returned = await submit();
+      const stored = await RecordsService.getMeta(oid);
+      expect(inserted).to.equal(true);
+      expect(returned).to.deep.equal(stored);
+      expect(returned.metadata).to.include({ title: 'Edited after write-back', concurrent: 'preserved', number: 'REQ-AFTER-WRITE' });
+      expect(returned.revision).to.equal(seedRevision + 2);
+    } finally {
+      RecordsService.mutateMetaInternal = originalMutation;
+    }
+  });
+
+  for (const concurrentAfterReturn of [false, true]) {
+    it(`creates through core onCreate postSync with ${concurrentAfterReturn ? 'a stale returned revision rejected' : 'the plugin stored record adopted'}`, async function () {
+      const { createRecordSaveContext } = require('@researchdatabox/redbox-core/dist/RecordSaveResponse') as typeof import('@researchdatabox/redbox-core/dist/RecordSaveResponse');
+      mock = await listen((req, res) => {
+        req.resume(); res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ result: { number: 'REQ-CORE-CREATE', sys_id: 'core-sys-id', payload: 'mapped' } }));
+      });
+      definition.connection.url = mock.url + '/catalog';
+      Reflect.set(sails.config, 'servicenowCatalog', { enabled: true, catalogs: { compressed: definition } });
+      let returned: WorkspaceRecord | undefined;
+      let returnedOid: string | undefined;
+      let concurrentRevision: number | undefined;
+      const service = sails.services.servicenowcatalogservice as ServicenowCatalogService;
+      Reflect.set(globalThis, 'serviceNowCreateFixture', async (createdOid: string, record: WorkspaceRecord) => {
+        returnedOid = createdOid;
+        returned = await service.submitRequest(createdOid, record, { catalog: 'compressed', event: 'create' }, { username: 'integration-test' });
+        expect(returned).to.deep.equal(await RecordsService.getMeta(createdOid));
+        if (concurrentAfterReturn) {
+          const edit = await RecordsService.mutateMetaInternal({
+            actor: { kind: 'service', id: 'ServiceNowFixture.afterReturn' }, authorization: { kind: 'service' }, oid: createdOid,
+            triggerPreSaveTriggers: false, triggerPostSaveTriggers: false,
+            mutate: snapshot => { snapshot.metadata.title = 'Concurrent edit after return'; snapshot.metadata.concurrent = 'preserved'; return snapshot; }
+          });
+          expect(edit.success, JSON.stringify(edit)).to.equal(true);
+          concurrentRevision = (await RecordsService.getMeta(createdOid)).revision;
+        }
+        return returned;
+      });
+      const type = await portalModel('recordtype').updateOne({ name: 'compressed-fixture' }).set({
+        hooks: { onCreate: { postSync: [{ function: '(oid, record) => globalThis.serviceNowCreateFixture(oid, record)' }] } }
+      });
+      if (type == null || typeof type !== 'object' || !('id' in type)) throw new Error('Fixture record type missing');
+      await portalModel('workflowstep').create({
+        name: 'compressed-fixture-draft', recordType: type.id, starting: true,
+        config: { form: 'compressed-fixture-form', workflow: { stage: 'compressed-fixture-draft', stageLabel: 'Draft' }, authorization: { viewRoles: [], editRoles: [] } }
+      });
+      try {
+        const response = await RecordsService.create(BrandingService.getDefault(), {
+          metadata: { title: 'Core create test' }, metaMetadata: {}
+        }, type, { username: 'integration-test' }, true, true, null,
+        createRecordSaveContext({ routeFamily: 'internal', operation: 'create' }));
+        expect(returned, JSON.stringify(response)).to.exist;
+        const stored = await RecordsService.getMeta(returnedOid!);
+        expect(stored.metadata).to.include({ number: 'REQ-CORE-CREATE', sys_id: 'core-sys-id', payload: 'mapped' });
+        expect(response.concurrency?.revision).to.equal(stored.revision);
+        console.info('ServiceNow core create outcome:', JSON.stringify({ concurrentAfterReturn, outcome: response.outcome, problems: response.problems, returnedRevision: returned!.revision, storedRevision: stored.revision }));
+        if (concurrentAfterReturn) {
+          expect(response.outcome, JSON.stringify(response)).to.equal('saved-with-warnings');
+          expect(response.problems.some(problem => problem.issues.some(issue => issue.code === 'record-revision-stale')), JSON.stringify(response)).to.equal(true);
+          expect(stored.metadata).to.include({ title: 'Concurrent edit after return', concurrent: 'preserved' });
+          expect(stored.revision).to.equal(concurrentRevision);
+          expect(stored.revision).to.equal(returned!.revision! + 1);
+        } else {
+          expect(response.outcome, JSON.stringify(response)).to.equal('saved');
+          expect(response.problems).to.deep.equal([]);
+          expect(stored.revision).to.equal(returned!.revision! + 1);
+        }
+      } finally {
+        Reflect.deleteProperty(globalThis, 'serviceNowCreateFixture');
+        if (returnedOid) await portalModel('record').destroy({ redboxOid: returnedOid });
+        await portalModel('workflowstep').destroy({ recordType: type.id });
+        await portalModel('recordtype').updateOne({ name: 'compressed-fixture' }).set({ hooks: {} });
+      }
+    });
+  }
+
+  it('does not run configured record-type pre, postSync or detached hooks on write-back', async function () {
+    const calls: string[] = [];
+    Reflect.set(globalThis, 'serviceNowFixtureCalls', calls);
+    const hook = (phase: string) => ({ function: `(oid, record) => { globalThis.serviceNowFixtureCalls.push('${phase}'); return record; }` });
+    await portalModel('recordtype').updateOne({ name: 'compressed-fixture' }).set({
+      hooks: { onUpdate: { pre: [hook('pre')], postSync: [hook('postSync')], post: [hook('post')] } }
+    });
+    try {
+      // Positive control: the same record type runs all three phases on an ordinary save.
+      const control = await RecordsService.updateMeta(BrandingService.getDefault(), oid, await RecordsService.getMeta(oid));
+      expect(control.success, JSON.stringify(control)).to.equal(true);
+      for (let i = 0; i < 50 && calls.length < 3; i++) await new Promise(resolve => setTimeout(resolve, 20));
+      expect(calls).to.deep.equal(['pre', 'postSync', 'post']);
+      calls.length = 0;
+      mock = await listen((req, res) => {
+        req.resume(); res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ result: { number: 'REQ-NO-HOOKS' } }));
+      });
+      const committed = await submit();
+      await new Promise(resolve => setTimeout(resolve, 100));
+      expect(calls).to.deep.equal([]);
+      expect(committed.revision).to.equal((await RecordsService.getMeta(oid)).revision);
+    } finally {
+      await portalModel('recordtype').updateOne({ name: 'compressed-fixture' }).set({ hooks: {} });
+      Reflect.deleteProperty(globalThis, 'serviceNowFixtureCalls');
+    }
+  });
+
+  it('throws a definite HTTP failure and persists Failed without response mappings', async function () {
+    mock = await listen((req, res) => {
+      req.resume(); res.statusCode = 503; res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ error: 'unavailable' }));
+    });
+    const error = await rejectedSubmission(submit());
+    expect(error).to.include({ oid, code: '503', uncertain: false, tag: 'CatalogRequestError' });
+    expect((await RecordsService.getMeta(oid)).metadata.servicenow_status).to.equal('Failed');
+    await audits(oid, 'failed');
+  });
 
   for (const encoding of ['br', 'gzip', 'deflate'] as const) {
     for (const doubleEncoded of [false, true]) {
@@ -150,10 +309,12 @@ describe('ServiceNow compressed responses in the portal runtime', function () {
           enabled: true, url: mock.url + '/oauth', grantType: 'client_credentials',
           clientId: 'public-client', clientSecret: 'private-client-secret'
         };
-        expect(await submit()).to.include({ code: '200', success: true, status: true });
+        const committed = await submit();
         expect(paths).to.deep.equal(['/oauth', '/catalog']);
         const stored = await portalModel('record').findOne({ redboxOid: oid });
         expect(stored).to.have.property('metadata').that.includes(response.result);
+        expect(stored).to.have.property('revision', committed.revision);
+        expect(committed.revision).to.be.greaterThan(seedRevision);
         const rows = await audits(oid, 'success', [
           'submitCatalogRequest', 'oauthTokenRequest', 'catalogOrderRequest', 'workspaceMetadataUpdate'
         ]);
@@ -184,7 +345,7 @@ describe('ServiceNow compressed responses in the portal runtime', function () {
       }
       res.end();
     });
-    expect(await submit()).to.include({ success: true });
+    expect(await submit()).to.have.nested.property('metadata.number', 'REQ-LARGE');
     expect(chunks).to.be.greaterThan(64);
     const stored = await portalModel('record').findOne({ redboxOid: oid });
     expect(stored).to.have.property('metadata').that.includes({ number: 'REQ-LARGE', sys_id: 'sys-large', payload });
@@ -221,8 +382,8 @@ describe('ServiceNow compressed responses in the portal runtime', function () {
       }
       expect(attempts).to.equal(1);
       definition.bodyTemplate.password = 'private-request-password';
-      const result = await submit();
-      expect(result).to.include({ code: '500', status: false, success: false });
+      const result = await rejectedSubmission(submit());
+      expect(result).to.include({ code: '500', uncertain: true, tag: 'CatalogRequestError' });
       expect(result.message).to.include('could not be decompressed (br)');
       expect(attempts).to.equal(2); // One direct client call and one full submission; neither retried.
       const stored = await portalModel('record').findOne({ redboxOid: oid });
@@ -256,7 +417,7 @@ describe('ServiceNow compressed responses in the portal runtime', function () {
           clientId: 'client', clientSecret: 'private-client-secret'
         };
       }
-      expect(await submit()).to.include({ code: '504', success: false, status: false });
+      expect(await rejectedSubmission(submit())).to.include({ code: '504' });
       // Bound the wait and close naturally, without closeAllConnections hiding a leak.
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {

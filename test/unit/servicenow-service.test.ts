@@ -1,6 +1,6 @@
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import type { ServiceNowCatalogDefinition } from '../../src/api/configmodels/ServiceNowCatalogAppConfig';
-import type { ServicenowCatalogService } from '../../src/api/services/ServicenowCatalogService';
+import type { WorkspaceRecord, ServiceNowSubmissionError as SubmissionError, ServicenowCatalogService } from '../../src/api/services/ServicenowCatalogService';
 import type { IntegrationAuditContext } from '../../src/api/services/servicenow/audit';
 
 const http = require('node:http') as typeof import('node:http');
@@ -129,8 +129,13 @@ function workspace(metadata: Record<string, unknown> = {}): {
   };
 }
 
-function successResponse(): { code: string; status: boolean; success: boolean } {
-  return { code: '200', status: true, success: true };
+const { ServiceNowSubmissionError } = require('../../dist/api/services/servicenow/errors') as typeof import('../../src/api/services/servicenow/errors');
+async function rejected(promise: Promise<unknown>): Promise<SubmissionError> {
+  try { await promise; } catch (error) {
+    expect(error).to.be.instanceOf(ServiceNowSubmissionError);
+    return error as SubmissionError;
+  }
+  throw new Error('Expected ServiceNowSubmissionError');
 }
 
 describe('ServiceNow catalog orchestration', function () {
@@ -152,6 +157,140 @@ describe('ServiceNow catalog orchestration', function () {
       });
       activeServer = undefined;
     }
+  });
+
+  type MutationOptions = Omit<Parameters<typeof RecordsService.mutateMetaInternal>[0], 'mutate'> & {
+    mutate: (snapshot: WorkspaceRecord) => WorkspaceRecord;
+  };
+
+  for (const scenario of [
+    { name: 'parent lookup', tag: 'ParentLookupError', code: '500', uncertain: false, dispatched: false },
+    { name: 'association', tag: 'ParentAssociationError', code: '500', uncertain: false, dispatched: false },
+    { name: 'request mapping', tag: 'MappingError', code: '500', uncertain: false, dispatched: false },
+    { name: 'OAuth', tag: 'OAuthTokenError', code: '401', uncertain: false, dispatched: true },
+    { name: 'HTTP', tag: 'CatalogRequestError', code: '503', uncertain: false, dispatched: true },
+    { name: 'transport', tag: 'CatalogRequestError', code: '500', uncertain: true, dispatched: true },
+    { name: 'request timeout', tag: 'CatalogTimeoutError', code: '504', uncertain: true, dispatched: true },
+    { name: 'workspace rejection', tag: 'WorkspaceUpdateError', code: '500', uncertain: true, dispatched: true },
+    { name: 'missing revision', tag: 'WorkspaceUpdateError', code: '500', uncertain: true, dispatched: true },
+    { name: 'invalid revision', tag: 'WorkspaceUpdateError', code: '500', uncertain: true, dispatched: true },
+    { name: 'read failure', tag: 'WorkspaceUpdateError', code: '500', uncertain: true, dispatched: true },
+    { name: 'unusable read', tag: 'WorkspaceUpdateError', code: '500', uncertain: true, dispatched: true },
+    { name: 'wrong OID', tag: 'WorkspaceUpdateError', code: '500', uncertain: true, dispatched: true },
+    { name: 'read brand mismatch', tag: 'WorkspaceUpdateError', code: '500', uncertain: true, dispatched: true },
+    { name: 'brand mismatch', tag: 'WorkspaceUpdateError', code: '500', uncertain: true, dispatched: true },
+    { name: 'parent write', tag: 'ParentUpdateError', code: '500', uncertain: true, dispatched: true },
+    { name: 'defect', tag: 'Defect', code: '500', uncertain: true, dispatched: true }
+  ]) {
+    it(`throws typed ${scenario.name} failure after status, audit, ledger and resource claim cleanup`, async function () {
+      const endpoint = await listen(async (req, res) => {
+        req.resume();
+        if (scenario.name === 'transport') { req.socket.destroy(); return; }
+        if (scenario.name === 'request timeout') return;
+        res.statusCode = scenario.name === 'OAuth' ? 401 : scenario.name === 'HTTP' ? 503 : 201;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ result: { number: 'REQ-FAILURE' }, error: 'unavailable', password: 'private-password' }));
+      });
+      activeServer = endpoint.server;
+      const config = createDefaultCatalogDefinition();
+      config.connection.url = endpoint.url;
+      config.connection.timeoutMs = 50;
+      config.connection.retry.maxAttempts = 1;
+      config.parentRecord = { oid: { kind: 'path', path: 'workspace.metadata.parentOid' } };
+      config.idempotency = { enabled: true };
+      config.dispatchClaim = { enabled: true, resources: { kind: 'path', path: 'workspace.metadata.resources' } };
+      config.responseFields.workspace = [{ destination: 'metadata.number', source: { kind: 'path', path: 'response.result.number' } }];
+      if (scenario.name === 'request mapping') config.requestFields = [{ destination: '__proto__.unsafe', source: { kind: 'path', path: 'oid' } }];
+      if (scenario.name === 'OAuth') config.oauth = { enabled: true, url: endpoint.url, clientId: 'client', clientSecret: 'private-client-secret', grantType: 'client_credentials' };
+      if (scenario.name === 'parent write') config.responseFields.parentRecord = config.responseFields.workspace;
+      if (scenario.name === 'defect') {
+        const httpModule = require('../../dist/api/services/servicenow/http') as typeof import('../../src/api/services/servicenow/http');
+        const { Effect, Layer } = require('effect') as typeof import('effect');
+        mock.method(httpModule, 'makeClientLayer', () => Layer.succeed(httpModule.ServiceNowClientTag, { submitCatalogOrder: () => Effect.die(new Error('injected defect')) }));
+      }
+      configureBrandAndCatalog(config);
+      const audit = makeAuditService();
+      setHookTestGlobal('IntegrationAuditService', audit);
+      const ledger = createTestIdempotencyLedger();
+      setHookTestGlobal('ServicenowCatalogIdempotency', ledger);
+      const { resourceModel } = require('../support/resource-claims') as typeof import('../support/resource-claims');
+      const resources = resourceModel();
+      setHookTestGlobal('ServicenowCatalogResourceClaim', resources);
+      const input = workspace({ parentOid: 'parent', title: 'original', resources: ['resource'] });
+      let stored: WorkspaceRecord = { ...structuredClone(input), redboxOid: 'typed-failure', revision: 1 };
+      const mutateMetaInternal = mock.fn(async (options: MutationOptions) => {
+        const writeBack = options.actor.id.endsWith('responseWriteBack');
+        if (writeBack && scenario.name === 'workspace rejection') return { success: false, concurrency: { revision: 1 } };
+        const fresh = structuredClone(stored);
+        if (writeBack && scenario.name === 'brand mismatch') fresh.metaMetadata = { brandId: 'another-brand' };
+        stored = options.mutate(fresh);
+        stored.revision = scenario.name === 'missing revision' && writeBack ? undefined : scenario.name === 'invalid revision' && writeBack ? -1 : 2;
+        return { success: true, concurrency: { revision: 2 } };
+      });
+      setHookTestGlobal('RecordsService', {
+        getMeta: async (oid: string) => {
+          if (oid === 'parent') {
+            if (scenario.name === 'parent lookup') throw new Error('parent unavailable');
+            return workspace();
+          }
+          if (scenario.name === 'read failure') throw new Error('read unavailable after commit');
+          if (scenario.name === 'unusable read') return { ...stored, metadata: null };
+          if (scenario.name === 'wrong OID') return { ...stored, redboxOid: 'another-record' };
+          if (scenario.name === 'read brand mismatch') return { ...stored, metaMetadata: { brandId: 'another-brand' } };
+          return stored;
+        },
+        updateMeta: async () => { throw new Error('parent write failed'); },
+        mutateMetaInternal
+      });
+      setHookTestGlobal('WorkspaceService', { addWorkspaceToRecord: async () => {
+        if (scenario.name === 'association') throw new Error('association failed');
+      } });
+      const options = { catalog: 'storage-new', event: 'create', idempotencyKey: 'failure-key' };
+      const error = await rejected(service.submitRequest('typed-failure', input, options, undefined));
+      expect(error).to.include({ oid: 'typed-failure', code: scenario.code, uncertain: scenario.uncertain, tag: scenario.tag });
+      expect(JSON.stringify(error)).not.to.include('private-password');
+      expect(error.message).not.to.include('private-client-secret');
+      expect(stored.metadata.servicenow_status).to.equal(scenario.uncertain ? 'Uncertain' : 'Failed');
+      if (['read failure', 'unusable read', 'wrong OID', 'read brand mismatch', 'missing revision', 'invalid revision'].includes(scenario.name)) {
+        expect(stored.metadata.number, 'committed mappings survive read failure and status write').to.equal('REQ-FAILURE');
+      }
+      expect([...ledger.rows.values()][0].status).to.equal(scenario.uncertain ? 'uncertain' : 'failed');
+      expect(audit.failAudit.mock.calls.some(call => call.arguments[0].integrationAction === 'submitCatalogRequest')).to.equal(true);
+      if (scenario.dispatched) expect([...resources.rows.values()][0].state).to.equal('uncertain');
+      else expect(resources.rows.size).to.equal(0);
+      for (const call of mutateMetaInternal.mock.calls) {
+        expect(call.arguments[0]).to.include({ triggerPreSaveTriggers: false, triggerPostSaveTriggers: false });
+      }
+      // A subsequent call must reach the durable ledger (or reclaim its failed row),
+      // proving the in-process idempotency lock was released when the API threw.
+      const lookups = audit.startAudit.mock.calls.length;
+      const retry = await rejected(service.submitRequest('typed-failure', input, options, undefined));
+      expect(retry.code).to.equal(scenario.uncertain || scenario.dispatched ? '409' : scenario.code);
+      expect(audit.startAudit.mock.calls.length).to.be.greaterThan(lookups);
+      const handlers: Record<string, () => void> = {};
+      getTestSails().on = (event: string, handler: () => void) => { handlers[event] = handler; };
+      const warnings: unknown[][] = [];
+      getTestSails().log.warn = (...args: unknown[]) => { warnings.push(args); };
+      service.init(); handlers.lower();
+      expect(warnings).to.deep.equal([]); // No completed fiber remains in flight.
+    });
+  }
+
+  it('throws an idempotency lookup error and releases the local guard', async function () {
+    const config = createDefaultCatalogDefinition();
+    config.connection.url = 'https://example.invalid/catalog';
+    config.idempotency = { enabled: true };
+    configureBrandAndCatalog(config);
+    const ledger = createTestIdempotencyLedger();
+    setHookTestGlobal('ServicenowCatalogIdempotency', { ...ledger, create: () => ({ fetch: async () => { throw new Error('ledger offline'); } }) });
+    const audit = makeAuditService();
+    setHookTestGlobal('IntegrationAuditService', audit);
+    for (let i = 0; i < 2; i++) {
+      expect(await rejected(service.submitRequest('lookup-failure', workspace(), { catalog: 'storage-new', event: 'create', idempotencyKey: 'key' }, undefined)))
+        .to.include({ code: '500', uncertain: false, tag: 'IdempotencyLookupError' });
+    }
+    expect(audit.failAudit.mock.calls.filter(call => call.arguments[0].integrationAction === 'submitCatalogRequest')).to.have.length(2);
+    expect(ledger.rows.size).to.equal(0);
   });
 
   it('runs named request mapping, optional parent association, split write-back, and nested audits', async function () {
@@ -225,8 +364,10 @@ describe('ServiceNow catalog orchestration', function () {
 
     const addWorkspaceToRecord = mock.fn(async (_parentOid: string, _workspaceOid: string) => ({ status: true }));
     setHookTestGlobal('WorkspaceService', { addWorkspaceToRecord });
+    let stored: WorkspaceRecord;
     const parent = { metadata: { title: 'Plan A', existing: 'keep' } };
     const getMeta = mock.fn(async (oid: string) => {
+      if (oid === 'workspace-1') return stored;
       if (oid !== 'parent-1') {
         throw new Error('Unexpected record ' + oid);
       }
@@ -237,7 +378,14 @@ describe('ServiceNow catalog orchestration', function () {
       _oid: string,
       _record: Record<string, unknown>
     ) => ({ status: true }));
-    setHookTestGlobal('RecordsService', { getMeta, updateMeta });
+    const mutateMetaInternal = mock.fn(async (options: Omit<Parameters<typeof RecordsService.mutateMetaInternal>[0], 'mutate'> & { mutate: (snapshot: WorkspaceRecord) => WorkspaceRecord }) => {
+      const fresh = { ...workspace({ parentOid: 'parent-1', title: 'Concurrent title', status: 'Published', concurrent: 'keep' }), revision: 7 };
+      options.mutate(fresh);
+      stored = { ...structuredClone(fresh), redboxOid: 'workspace-1', revision: 8, metaMetadata: { ...fresh.metaMetadata, lastSavedBy: 'core-normalised' } };
+      expect(fresh.metadata).to.deep.equal({ parentOid: 'parent-1', title: 'Concurrent title', status: 'Published', concurrent: 'keep', servicenow_number: 'REQ001234' });
+      return { success: true, concurrency: { revision: 8 } };
+    });
+    setHookTestGlobal('RecordsService', { getMeta, updateMeta, mutateMetaInternal });
     const audit = makeAuditService();
     setHookTestGlobal('IntegrationAuditService', audit);
 
@@ -246,16 +394,19 @@ describe('ServiceNow catalog orchestration', function () {
       title: 'Research storage',
       status: 'Draft'
     });
-    const triggerResponse = successResponse();
+
     const result = await service.submitRequest(
       'workspace-1',
       submittedWorkspace,
       { catalog: 'storage-new', event: 'create' },
-      { username: 'researcher@example.edu' },
-      triggerResponse
+      { username: 'researcher@example.edu' }
     );
 
-    expect(result).to.equal(triggerResponse);
+    expect(result).to.have.nested.property('metadata.servicenow_number', 'REQ001234');
+    expect(result).to.equal(stored!);
+    expect(result.metaMetadata?.lastSavedBy).to.equal('core-normalised');
+    expect(result.revision).to.equal(8);
+    expect(getMeta.mock.calls.map(call => call.arguments[0])).to.deep.equal(['parent-1', 'workspace-1']);
     expect(captured).to.have.length(1);
     expect(captured[0].method).to.equal('POST');
     expect(captured[0].headers['x-integration']).to.equal('redbox');
@@ -271,19 +422,16 @@ describe('ServiceNow catalog orchestration', function () {
     });
     expect(addWorkspaceToRecord.mock.calls[0].arguments).to.deep.equal(['parent-1', 'workspace-1']);
     expect(getMeta.mock.calls[0].arguments).to.deep.equal(['parent-1']);
-    expect(updateMeta.mock.calls).to.have.length(2);
-    expect(updateMeta.mock.calls[0].arguments[1]).to.equal('workspace-1');
-    expect(updateMeta.mock.calls[0].arguments[2]).to.have.nested.property(
-      'metadata.servicenow_number',
-      'REQ001234'
-    );
-    expect(submittedWorkspace).to.have.nested.property(
-      'metadata.servicenow_number',
-      'REQ001234'
-    );
-    expect(updateMeta.mock.calls[0].arguments[2]).to.have.nested.property('metadata.status', 'Draft');
-    expect(updateMeta.mock.calls[1].arguments[1]).to.equal('parent-1');
-    expect(updateMeta.mock.calls[1].arguments[2]).to.deep.equal({
+    expect(mutateMetaInternal.mock.calls).to.have.length(1);
+    expect(mutateMetaInternal.mock.calls[0].arguments[0]).to.include({
+      oid: 'workspace-1', triggerPreSaveTriggers: false, triggerPostSaveTriggers: false
+    });
+    expect(mutateMetaInternal.mock.calls[0].arguments[0].retry).to.deep.equal({ idempotent: true, recomputable: true, maxAttempts: 3 });
+    expect(submittedWorkspace.metadata).not.to.have.property('servicenow_number');
+    expect(result).to.have.nested.property('metadata.concurrent', 'keep');
+    expect(updateMeta.mock.calls).to.have.length(1);
+    expect(updateMeta.mock.calls[0].arguments[1]).to.equal('parent-1');
+    expect(updateMeta.mock.calls[0].arguments[2]).to.deep.equal({
       metadata: { title: 'Plan A', existing: 'keep', servicenow_sys_id: 'sys-123' }
     });
 
@@ -309,6 +457,46 @@ describe('ServiceNow catalog orchestration', function () {
     expect(audit.failAudit.mock.calls).to.have.length(0);
   });
 
+  for (const concurrent of [false, true]) {
+    it(`returns the exact stored read with literal bracket and nested destinations${concurrent ? ' after a concurrent commit' : ''}`, async function () {
+      const endpoint = await listen(async (_req, res) => {
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ result: { number: 'REQ-PATH' } }));
+      });
+      activeServer = endpoint.server;
+      const config = createDefaultCatalogDefinition();
+      config.connection.url = endpoint.url;
+      config.responseFields.workspace = ['metadata.answer[0]', 'metadata.a.b'].map(destination => ({
+        destination, source: { kind: 'path', path: 'response.result.number' }
+      }));
+      configureBrandAndCatalog(config);
+      setHookTestGlobal('IntegrationAuditService', makeAuditService());
+      let stored: WorkspaceRecord = { ...workspace({ title: 'Original', a: { keep: true } }), redboxOid: 'path-record', revision: 7 };
+      let candidate: WorkspaceRecord | undefined;
+      const getMeta = mock.fn(async (_oid: string) => stored);
+      setHookTestGlobal('RecordsService', {
+        getMeta,
+        mutateMetaInternal: async (options: MutationOptions) => {
+          candidate = options.mutate(structuredClone(stored));
+          stored = { ...structuredClone(candidate), revision: 8, metaMetadata: { ...candidate.metaMetadata, lastSavedBy: 'normalised', lastSaveDate: 'normalised-date' } };
+          if (concurrent) stored = { ...stored, metadata: { ...stored.metadata, title: 'Concurrent title' }, revision: 9 };
+          // This is the review probe: finishSave can report revision 9 for a
+          // callback candidate whose write was revision 8.
+          return { success: true, concurrency: { revision: stored.revision } };
+        }
+      });
+      const result = await service.submitRequest('path-record', workspace(), { catalog: 'storage-new', event: 'create' }, undefined);
+      expect(result).to.equal(stored);
+      expect(result).not.to.equal(candidate);
+      expect(getMeta.mock.calls).to.have.length(1);
+      expect(getMeta.mock.calls[0].arguments).to.deep.equal(['path-record']);
+      expect(result.revision).to.equal(concurrent ? 9 : 8);
+      expect(result.metaMetadata).to.include({ lastSavedBy: 'normalised', lastSaveDate: 'normalised-date' });
+      expect(result.metadata).to.deep.equal({ title: concurrent ? 'Concurrent title' : 'Original', 'answer[0]': 'REQ-PATH', a: { keep: true, b: 'REQ-PATH' } });
+      expect(result.metadata).not.to.have.property('answer');
+    });
+  }
+
   it('submits without parent lookup, association, or metadata writes when none are configured', async function () {
     let requests = 0;
     const testServer = await listen(async (_req, res) => {
@@ -323,15 +511,21 @@ describe('ServiceNow catalog orchestration', function () {
     const audit = makeAuditService();
     setHookTestGlobal('IntegrationAuditService', audit);
 
+    const input = workspace({ title: 'No parent' });
+    const getMeta = mock.fn(async () => { throw new Error('Unexpected read'); });
+    const mutateMetaInternal = mock.fn(async () => { throw new Error('Unexpected write'); });
+    setHookTestGlobal('RecordsService', { getMeta, mutateMetaInternal });
     const result = await service.submitRequest(
       'workspace-no-parent',
-      workspace({ title: 'No parent' }),
+      input,
       { catalog: 'storage-new', event: 'update' },
-      undefined,
-      successResponse()
+      undefined
     );
 
-    expect(result).to.include({ status: true, success: true });
+    expect(result).to.have.property('metadata');
+    expect(result).to.equal(input);
+    expect(getMeta.mock.calls).to.have.length(0);
+    expect(mutateMetaInternal.mock.calls).to.have.length(0);
     expect(requests).to.equal(1);
     expect(audit.startAudit.mock.calls.map(call => call.arguments[1])).to.deep.equal([
       'submitCatalogRequest',
@@ -344,34 +538,31 @@ describe('ServiceNow catalog orchestration', function () {
     config.connection.url = 'https://example.service-now.com/catalog';
     configureBrandAndCatalog(config);
 
-    const missingCatalog = await service.submitRequest(
+    const missingCatalog = await rejected(service.submitRequest(
       'workspace-options',
       workspace(),
       { catalog: '', event: 'create' },
-      undefined,
-      {}
-    );
-    expect(missingCatalog).to.include({ code: '400', status: false, success: false });
+      undefined
+    ));
+    expect(missingCatalog).to.include({ code: '400', uncertain: false, tag: 'ServiceNowConfigError' });
 
-    const unknown = await service.submitRequest(
+    const unknown = await rejected(service.submitRequest(
       'workspace-unknown',
       workspace(),
       { catalog: 'does-not-exist', event: 'create' },
-      undefined,
-      {}
-    );
-    expect(unknown).to.include({ code: '400', status: false, success: false });
+      undefined
+    ));
+    expect(unknown).to.include({ code: '400', uncertain: false, tag: 'UnknownCatalogError' });
     expect(unknown.message).to.contain("Unknown ServiceNow catalog 'does-not-exist'");
 
     config.enabled = false;
     configureBrandAndCatalog(config);
-    const disabledResponse = successResponse();
+    const disabledResponse = workspace();
     const disabled = await service.submitRequest(
       'workspace-disabled',
-      workspace(),
+      disabledResponse,
       { catalog: 'storage-new', event: 'create' },
-      undefined,
-      disabledResponse
+      undefined
     );
     expect(disabled).to.equal(disabledResponse);
   });
@@ -384,15 +575,14 @@ describe('ServiceNow catalog orchestration', function () {
     const audit = makeAuditService();
     setHookTestGlobal('IntegrationAuditService', audit);
 
-    const result = await service.submitRequest(
+    const result = await rejected(service.submitRequest(
       'workspace-missing-parent',
       workspace(),
       { catalog: 'storage-new', event: 'create' },
-      undefined,
-      {}
-    );
+      undefined
+    ));
 
-    expect(result).to.include({ code: '400', status: false, success: false });
+    expect(result).to.include({ code: '400', uncertain: false, tag: 'ParentRecordRequiredError' });
     expect(result.message).to.contain('requires a non-empty parent record OID');
     expect(audit.startAudit.mock.calls[0].arguments[1]).to.equal('submitCatalogRequest');
     expect(audit.failAudit.mock.calls).to.have.length(1);
@@ -428,15 +618,14 @@ describe('ServiceNow catalog orchestration', function () {
     const submittedWorkspace = workspace({ parentOid: 'parent-1', title: 'Preserve me' });
     const original = structuredClone(submittedWorkspace);
 
-    const result = await service.submitRequest(
+    const result = await rejected(service.submitRequest(
       'workspace-association-failure',
       submittedWorkspace,
       { catalog: 'storage-new', event: 'create' },
-      undefined,
-      {}
-    );
+      undefined
+    ));
 
-    expect(result).to.include({ code: '500', status: false, success: false });
+    expect(result).to.include({ code: '500' });
     expect(requests).to.equal(0);
     expect(updateMeta.mock.calls).to.have.length(1);
     expect(updateMeta.mock.calls[0].arguments[1]).to.equal('workspace-association-failure');
@@ -479,15 +668,14 @@ describe('ServiceNow catalog orchestration', function () {
     const submittedWorkspace = workspace({ title: 'Preserve me' });
     const original = structuredClone(submittedWorkspace);
 
-    const result = await service.submitRequest(
+    const result = await rejected(service.submitRequest(
       'workspace-http-failure',
       submittedWorkspace,
       { catalog: 'storage-new', event: 'update' },
-      undefined,
-      {}
-    );
+      undefined
+    ));
 
-    expect(result).to.include({ code: '503', status: false, success: false });
+    expect(result).to.include({ code: '503' });
     expect(result.message).to.contain('unavailable');
     expect(updateMeta.mock.calls).to.have.length(1);
     expect(updateMeta.mock.calls[0].arguments[1]).to.equal('workspace-http-failure');
@@ -534,14 +722,13 @@ describe('ServiceNow catalog orchestration', function () {
         }
       })));
       setHookTestGlobal('IntegrationAuditService', audit);
-      const result = await service.submitRequest(
+      const result = await rejected(service.submitRequest(
         'workspace-idempotent',
         workspace(),
         { catalog: 'storage-new', event: 'create', idempotencyKey: 'stable-key' },
-        undefined,
-        {}
-      );
-      expect(result).to.include({ code: '409', status: false, success: false });
+        undefined
+      ));
+      expect(result).to.include({ code: '409' });
       expect(result.message).to.contain(prior.expectedState);
     }
   });
@@ -606,11 +793,10 @@ describe('ServiceNow catalog orchestration', function () {
       'workspace-retry',
       workspace(),
       { catalog: 'storage-new', event: 'update', idempotencyKey: 'retry-key' },
-      undefined,
-      successResponse()
+      undefined
     );
 
-    expect(result).to.include({ status: true, success: true });
+    expect(result).to.have.property('metadata');
     expect(audit.getAuditLog.mock.calls).to.have.length(1);
     const submitAudit = audit.startAudit.mock.calls.find(
       call => call.arguments[1] === 'submitCatalogRequest'
@@ -641,26 +827,22 @@ describe('ServiceNow catalog orchestration', function () {
     });
     setHookTestGlobal('IntegrationAuditService', audit);
 
-    const results = await Promise.all([
+    const results = await Promise.allSettled([
       service.submitRequest(
         'workspace-concurrent',
         workspace(),
         { catalog: 'storage-new', event: 'create', idempotencyKey: 'concurrent-key' },
-        undefined,
-        successResponse()
-      ),
+        undefined),
       service.submitRequest(
         'workspace-concurrent',
         workspace(),
         { catalog: 'storage-new', event: 'create', idempotencyKey: 'concurrent-key' },
-        undefined,
-        successResponse()
-      )
+        undefined)
     ]);
 
     expect(requests).to.equal(1);
-    expect(results.filter(result => result.status === true)).to.have.length(1);
-    expect(results.filter(result => result.code === '409')).to.have.length(1);
+    expect(results.filter(result => result.status === 'fulfilled')).to.have.length(1);
+    expect(results.filter(result => result.status === 'rejected' && result.reason instanceof ServiceNowSubmissionError && result.reason.code === '409')).to.have.length(1);
   });
 
   it('blocks an immediate retry from the durable completed claim before audit visibility', async function () {
@@ -681,19 +863,17 @@ describe('ServiceNow catalog orchestration', function () {
       'workspace-immediate',
       workspace(),
       { catalog: 'storage-new', event: 'create', idempotencyKey: 'immediate-key' },
-      undefined,
-      successResponse()
+      undefined
     );
-    const retry = await service.submitRequest(
+    const retry = await rejected(service.submitRequest(
       'workspace-immediate',
       workspace(),
       { catalog: 'storage-new', event: 'create', idempotencyKey: 'immediate-key' },
-      undefined,
-      {}
-    );
+      undefined
+    ));
 
-    expect(first.status).to.equal(true);
-    expect(retry).to.include({ code: '409', status: false });
+    expect(first).to.have.property('metadata');
+    expect(retry).to.include({ code: '409' });
     expect(requests).to.equal(1);
   });
 
@@ -720,27 +900,34 @@ describe('ServiceNow catalog orchestration', function () {
     };
     service.init();
 
-    const submission = service.submitRequest(
+    let stored: WorkspaceRecord = workspace();
+    setHookTestGlobal('RecordsService', {
+      updateMeta: async () => { throw new Error('Unexpected fallback'); },
+      mutateMetaInternal: async (options: MutationOptions) => {
+        stored = options.mutate(stored);
+        return { success: true, concurrency: { revision: 2 } };
+      }
+    });
+    const submission = rejected(service.submitRequest(
       'workspace-interrupted',
       workspace(),
       { catalog: 'storage-new', event: 'create', idempotencyKey: 'interrupted-key' },
-      undefined,
-      {}
-    );
+      undefined
+    ));
     await started;
     handlers.lower();
     const interrupted = await submission;
-    const retry = await service.submitRequest(
+    const retry = await rejected(service.submitRequest(
       'workspace-interrupted',
       workspace(),
       { catalog: 'storage-new', event: 'create', idempotencyKey: 'interrupted-key' },
-      undefined,
-      {}
-    );
+      undefined
+    ));
 
-    expect(interrupted).to.include({ code: '503', status: false });
-    expect(retry).to.include({ code: '409', status: false });
+    expect(interrupted).to.include({ code: '503', uncertain: true, tag: 'Interrupted' });
+    expect(retry).to.include({ code: '409' });
     expect(requests).to.equal(1);
+    expect(stored.metadata.servicenow_status).to.equal('Uncertain');
     expect(audit.failAudit.mock.calls.some(call => {
       const details = call.arguments[2];
       const summary = details?.requestSummary as Record<string, unknown> | undefined;
@@ -768,19 +955,19 @@ describe('ServiceNow catalog orchestration', function () {
       }
     });
 
-    const result = await service.submitRequest(
+    const result = await rejected(service.submitRequest(
       'workspace-total-timeout', workspace(),
       { catalog: 'storage-new', event: 'create', idempotencyKey: 'total-timeout-key' },
-      undefined, successResponse()
-    );
-    const replay = await service.submitRequest(
+      undefined
+    ));
+    const replay = await rejected(service.submitRequest(
       'workspace-total-timeout', workspace(),
       { catalog: 'storage-new', event: 'create', idempotencyKey: 'total-timeout-key' },
-      undefined, {}
-    );
+      undefined
+    ));
 
-    expect(result).to.include({ code: '504', status: false, success: false });
-    expect(replay).to.include({ code: '409', status: false });
+    expect(result).to.include({ code: '504', uncertain: true, tag: 'CatalogTimeoutError' });
+    expect(replay).to.include({ code: '409' });
     expect(requests).to.equal(1);
     expect(updates[0]).to.have.nested.property('metadata.servicenow_status', 'Uncertain');
     expect(audit.failAudit.mock.calls.some(call => {
@@ -827,11 +1014,10 @@ describe('ServiceNow catalog orchestration', function () {
       details.redboxOid,
       workspace(),
       { catalog: details.catalog, event: 'create', idempotencyKey: details.idempotencyKey },
-      undefined,
-      successResponse()
+      undefined
     );
 
-    expect(result).to.include({ status: true, success: true });
+    expect(result).to.have.property('metadata');
     expect(requests).to.equal(1);
     expect([...ledger.rows.values()][0]?.status).to.equal('completed');
   });
@@ -870,15 +1056,14 @@ describe('ServiceNow catalog orchestration', function () {
     );
     expect(crashedClaim.decision).to.equal('claimed');
 
-    const retry = await service.submitRequest(
+    const retry = await rejected(service.submitRequest(
       details.redboxOid,
       workspace(),
       { catalog: details.catalog, event: 'create', idempotencyKey: details.idempotencyKey },
-      undefined,
-      {}
-    );
+      undefined
+    ));
 
-    expect(retry).to.include({ code: '409', status: false });
+    expect(retry).to.include({ code: '409' });
     expect([...ledger.rows.values()][0]?.status).to.equal('completed');
   });
 
@@ -938,13 +1123,12 @@ describe('ServiceNow catalog orchestration', function () {
       idempotencyKey: 'long-running-key'
     };
 
-    const submission = service.submitRequest(
+    const submission = rejected(service.submitRequest(
       details.redboxOid,
       workspace(),
       { catalog: details.catalog, event: 'create', idempotencyKey: details.idempotencyKey },
-      undefined,
-      {}
-    );
+      undefined
+    ));
     await started;
     const {
       CATALOG_IDEMPOTENCY_CLAIM_LEASE_MS,
@@ -963,7 +1147,7 @@ describe('ServiceNow catalog orchestration', function () {
 
     expect(competingClaim.decision).to.equal('in-progress');
     handlers.lower();
-    expect(await submission).to.include({ code: '503', status: false });
+    expect(await submission).to.include({ code: '503' });
   });
 
   it('does not consult the idempotency ledger when the catalog setting is disabled', async function () {
@@ -983,8 +1167,7 @@ describe('ServiceNow catalog orchestration', function () {
       'workspace-no-idempotency',
       workspace(),
       { catalog: 'storage-new', event: 'create', idempotencyKey: 'ignored-key' },
-      undefined,
-      successResponse()
+      undefined
     );
 
     expect(audit.getAuditLog.mock.calls).to.have.length(0);
@@ -1017,20 +1200,18 @@ describe('ServiceNow catalog orchestration', function () {
       'workspace-hook-fallback',
       workspace(),
       { catalog: 'storage-new', event: 'create' },
-      undefined,
-      successResponse()
+      undefined
     );
-    expect(fallbackResult).to.include({ status: true, success: true });
+    expect(fallbackResult).to.have.property('metadata');
     expect(requests).to.equal(1);
 
     presentKeys.add('servicenowCatalog');
-    const skippedResponse = successResponse();
+    const skippedResponse = workspace();
     const storedOverrideResult = await service.submitRequest(
       'workspace-brand-disabled',
-      workspace(),
+      skippedResponse,
       { catalog: 'storage-new', event: 'create' },
-      undefined,
-      skippedResponse
+      undefined
     );
     expect(storedOverrideResult).to.equal(skippedResponse);
     expect(requests).to.equal(1);
@@ -1042,15 +1223,14 @@ describe('ServiceNow catalog orchestration', function () {
     configureBrandAndCatalog(config);
     setHookTestGlobal('BrandingService', { getBrandById: () => undefined });
 
-    const result = await service.submitRequest(
+    const result = await rejected(service.submitRequest(
       'workspace-unknown-brand',
       workspace(),
       { catalog: 'storage-new', event: 'create' },
-      undefined,
-      {}
-    );
+      undefined
+    ));
 
-    expect(result).to.include({ code: '400', status: false, success: false });
+    expect(result).to.include({ code: '400' });
     expect(result.message).to.contain("unknown brand 'brand-id'");
   });
 
@@ -1147,17 +1327,18 @@ describe('ServiceNow catalog orchestration', function () {
       const associated: string[] = [];
       setHookTestGlobal('WorkspaceService', { addWorkspaceToRecord: async (_parent: string, oid: string) => { associated.push(oid); } });
       const input = workspace({ parentOid: 'parent', options: ['resource-a'] });
-      const first = service.submitRequest('request-a', input, { catalog: 'storage-new', event: 'create' }, {}, successResponse());
+      const first = service.submitRequest('request-a', input, { catalog: 'storage-new', event: 'create' }, {}).then(record => record, error => { expect(error).to.be.instanceOf(ServiceNowSubmissionError); return error as SubmissionError; });
       try {
         await received;
-        const second = await service.submitRequest('request-b', input, { catalog: 'storage-new', event: 'create' }, {}, successResponse());
-        expect(second).to.include({ code: '409', status: false, success: false });
+        const second = await rejected(service.submitRequest('request-b', input, { catalog: 'storage-new', event: 'create' }, {}));
+        expect(second).to.include({ code: '409' });
         expect(associated).to.deep.equal(['request-a']);
       } finally { finish(); }
       const outcome = await first;
-      expect(outcome.success).to.equal(!uncertain);
+      if (uncertain) expect(outcome).to.include({ code: '503', uncertain: false });
+      else expect(outcome).to.equal(input);
       expect([...ledger.rows.values()][0]!.state).to.equal(uncertain ? 'uncertain' : 'submitted');
-      const third = await service.submitRequest('request-c', input, { catalog: 'storage-new', event: 'create' }, {}, successResponse());
+      const third = await rejected(service.submitRequest('request-c', input, { catalog: 'storage-new', event: 'create' }, {}));
       expect(third.code).to.equal('409');
       expect(count).to.equal(1);
       Reflect.deleteProperty(globalThis, 'ServicenowCatalogResourceClaim');

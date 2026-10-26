@@ -24,3 +24,12 @@ export async function listen(
     })
   };
 }
+
+export async function rejectedSubmission(promise: Promise<unknown>) {
+  const { ServiceNowSubmissionError } = require('@researchdatabox/sails-hook-redbox-servicenow-catalog/dist/api/services/servicenow/errors') as typeof import('../../src/api/services/servicenow/errors');
+  try { await promise; } catch (error) {
+    if (!(error instanceof ServiceNowSubmissionError)) throw error;
+    return error;
+  }
+  throw new Error('Expected ServiceNowSubmissionError');
+}
