@@ -1,6 +1,6 @@
 {
   "name": "@researchdatabox/sails-hook-redbox-servicenow-catalog",
-  "version": "1.0.0",
+  "version": "1.0.0-beta.50",
   "description": "Reusable ReDBox integration service for submitting named ServiceNow catalog items.",
   "main": "dist/index.js",
   "files": [
