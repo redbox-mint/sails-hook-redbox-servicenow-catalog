@@ -1,85 +1,403 @@
-## A Sails Hook Redbox Catalog
+# ServiceNow Catalog Hook for ReDBox v5
 
-A sails hook that adds service-now integration into redbox-portal
+This hook provides reusable ServiceNow catalog submission mechanics for ReDBox.
+Customer hooks own record types, forms, workflows, and the decision to submit.
+This hook owns named catalog configuration, mapping, OAuth, HTTP retries and
+timeouts, optional parent association, response write-back, auditing, and
+opt-in idempotency.
 
-## api
+The hook does not register a `servicenow-catalog` record type, workspace type,
+workflow, form, Angular application, view, or navigation entry.
 
-Main API of your Hook can be stored in controllers and services
+## Runtime compatibility
 
-- controllers
-- services
-  
-## config & form-config
+This hook requires an Effect-4 ReDBox core (develop after portal #4918),
+Node.js 24 or newer, and a host-provided `effect` satisfying `^4.0.4`.
+Effect is a peer dependency so the hook shares the portal's runtime; the exact
+`4.0.4` development dependency is used for compilation and unit tests.
 
-This configurations are redbox-portal dependent. They will allow redbox to be available as a record
-If you require to have a form in your portal
+The core peer range `>=5.1.0-beta.0 <6.0.0` identifies the supported core line,
+but cannot identify the Effect migration: the published `5.1.0-beta.12573`
+core still uses Effect 3. That core and older portal images are not supported
+by this port. Installing a separate Effect 4 beside an Effect-3 core is not a
+supported compatibility mode. Until an Effect-4 core beta is published, use a
+portal develop image containing the migrated core. Some develop images report
+an internal core version that requires `--legacy-peer-deps` when installing
+the hook tarball; verify the host's actual Effect version as well.
 
-- `config/recordtype`
-- `config/workflow`
-- `form-config/catalog-1.0-draft`
+## Configuration
 
-## index
+`servicenowCatalog` is brand-aware and disabled by default. It contains any
+number of named catalog definitions:
 
-Main entry point for the hook
-
-### initialize
-
-Init code before it gets hooked. 
-
-### routes
-
-Controller routes exposed to the sails front-end
-
-```javascript
-  'post /:branding/:portal/ws/catalog/rdmp': CatalogController.rdmpInfo,
-  'post /:branding/:portal/ws/catalog/request': CatalogController.request
+```json
+{
+  "enabled": true,
+  "catalogs": {
+    "storage-new": {
+      "enabled": true,
+      "connection": {
+        "url": "https://example.service-now.com/api/sn_sc/servicecatalog/items/ITEM_ID/order_now",
+        "method": "post",
+        "headers": {
+          "Authorization": "Basic BASE64_CREDENTIALS"
+        },
+        "timeoutMs": 30000,
+        "totalTimeoutMs": 120000,
+        "retry": {
+          "maxAttempts": 3,
+          "baseDelayMs": 1000,
+          "maxDelayMs": 10000,
+          "retryOnStatusCodes": [408, 429, 500, 502, 503, 504]
+        }
+      },
+      "oauth": {
+        "enabled": false,
+        "url": "",
+        "clientId": "",
+        "clientSecret": "",
+        "grantType": "client_credentials"
+      },
+      "bodyTemplate": {
+        "sysparm_quantity": "1",
+        "get_portal_messages": "true",
+        "variables": {}
+      },
+      "requestFields": [
+        {
+          "destination": "variables.short_description",
+          "source": {
+            "kind": "handlebars",
+            "template": "{{workspace.metadata.title}}"
+          }
+        },
+        {
+          "destination": "variables.requested_size",
+          "source": {
+            "kind": "jsonata",
+            "expression": "workspace.metadata.storage_size"
+          }
+        }
+      ],
+      "responseFields": {
+        "workspace": [
+          {
+            "destination": "metadata.servicenow_number",
+            "source": {
+              "kind": "path",
+              "path": "response.result.number"
+            }
+          },
+          {
+            "destination": "metadata.status",
+            "source": {
+              "kind": "path",
+              "path": "response.result.state",
+              "defaultValue": "Provisioning"
+            }
+          }
+        ],
+        "parentRecord": [
+          {
+            "destination": "metadata.storage_request_number",
+            "source": {
+              "kind": "path",
+              "path": "response.result.number"
+            }
+          }
+        ]
+      },
+      "parentRecord": {
+        "oid": {
+          "kind": "path",
+          "path": "workspace.metadata.parentOid"
+        }
+      },
+      "responseNormalization": {
+        "parseJsonString": true
+      },
+      "idempotency": {
+        "enabled": true,
+        "key": {
+          "kind": "handlebars",
+          "template": "{{oid}}:{{trigger.event}}:storage-new"
+        }
+      }
+    }
+  }
+}
 ```
 
-### configure
+Hook defaults are merged with brand configuration, with the brand values taking
+precedence. New configuration must use named catalogs. The previous
+single-catalog shape is temporarily accepted as a catalog named `default` and
+emits a deprecation warning.
 
-Configuration and services to your sails app
+The application-configuration model declares the Authorization header, OAuth
+client secret, password, and refresh token as secrets. Do not put credentials
+in mappings, audit summaries, source control, or trigger options.
 
-```javascript
-  sails.services['CatalogService'] = CatalogService;
+Secret fields use core's static `catalogs.*` wildcard paths. A wildcard matches
+one literal catalog name, including hyphens, dots and brackets (for example,
+`storage-request` or `storage.request[1]`). The deprecated single-catalog shape
+also retains its secret declarations. This requires the wildcard-aware
+AppConfigService introduced by redbox-portal commit `d6b9ad357` (#4900).
+
+Saving `__REDACTED__` preserves an existing stored secret; with no existing
+secret it omits the field so hook/environment defaults can apply. To remove a
+stored override explicitly, submit core's `__CLEAR_SECRET__` marker.
+
+An affected build using the old bracket-path declarations with this core may
+have stored `__REDACTED__` over real per-catalog credentials or exposed stored
+credentials in the admin form. This fix cannot recover overwritten values.
+Before reusing an affected installation, inspect stored per-catalog fields for
+that literal placeholder without logging credentials. Restore the real value
+from an authoritative source, or explicitly clear the override to restore an
+environment fallback. Rotate credentials that may have been exposed. No
+automatic migration deletes placeholder values.
+
+### OAuth
+
+OAuth client-credentials, password, and refresh-token grants are supported.
+When OAuth is enabled, the access token is fetched through the shared HTTP
+runtime and reused across retries for one submission. Additional connection
+headers are still applied, with the OAuth bearer token taking precedence over
+an Authorization header.
+
+## Calling the service
+
+A customer-owned save hook calls the standard exported service. This is a breaking
+change: `submitRequest` accepts four arguments and returns `Promise<WorkspaceRecord>`
+instead of mutating a trigger response:
+
+```ts
+const service = sails.services.servicenowcatalogservice;
+if (!service.returnsCommittedRecord?.()) {
+  throw new Error('Upgrade the ServiceNow catalog plugin before using this hook.');
+}
+const committed = await service.submitRequest(
+  oid,
+  workspaceData,
+  {
+    catalog: 'storage-new',
+    event: 'create',
+    // Optional when the catalog's idempotency binding resolves a key.
+    idempotencyKey: oid + ':create:storage-new',
+    // Optional when the caller has already resolved the relationship.
+    parentRecordOid: workspaceData.metadata.parentOid
+  },
+  req.user
+);
 ```
 
-## Development in redbox-portal
+`catalog` and `event` are required. Runtime options cannot replace catalog
+URLs, credentials, body templates, retry policy, or mappings. Success returns the
+stored workspace record read back once after response write-back. Its content
+and `revision` describe the same stored state, including core save normalisation
+and any concurrent changes visible to that read. Only mapped destinations are
+applied to a fresh storage snapshot; concurrent changes to other fields are
+preserved. Write-back disables both pre
+and post record hooks. With no workspace response mappings, no workspace write
+or read occurs and the input `workspaceData` is returned unchanged. An explicitly
+disabled integration or catalog also returns that same input unchanged without
+saving.
 
-A docker-compose.yml file is present in support/development and is setup to run the full ReDBox stack and install the hook. To run the stack there is a ReDBox Sails Hook Run Utility in the root of the project
+Failures throw `ServiceNowSubmissionError` (exported from
+`dist/api/services/servicenow/errors`, also available on the service module).
+It carries `oid`, an HTTP-style string `code`, `uncertain`, an optional failure
+`tag`, and the existing redacted diagnostic `message`. Audits, idempotency ledger
+outcomes, dispatch claim transitions and `Failed`/`Uncertain` status writes are
+completed before throwing, where applicable. Write-back failures are uncertain:
+ServiceNow may already have accepted the order, even when the local save failed.
+A failed or unusable read after a successful write-back is also uncertain: the
+order and local write have committed, but no consistent record can be returned.
+The saved workspace is retained. Reconcile uncertain outcomes before retrying.
 
-### Usage #1
+### Using inside a postSync hook
+
+Check `returnsCommittedRecord()` before relying on this contract, and **return the
+record you get back** from the hook:
+
+```ts
+return await service.submitRequest(oid, workspaceData, options, user);
 ```
-ReDBox Sails Hook Run Utility
-Usage: ./runForDev.sh [-a|--(no-)angular] [-h|--help]
-	-a,--angular,--no-angular: Angular mode. Will ensure permissions are set correctly on the Sails working directory so that changes can be applied (off by default)
-	-h,--help: Prints help
+
+A core containing [redbox-mint/redbox-portal#5022](https://github.com/redbox-mint/redbox-portal/pull/5022)
+verifies the returned revision against storage and adopts the returned stored
+record (which may include concurrent changes) for its chained postSync save. Without that core change, core still reports
+`record-revision-stale` even though the response fields have been saved. Let
+submission errors propagate so core reports the hook failure as `post-save-failed`.
+With no workspace response mappings the input is returned unchanged, so core
+adopts no newer committed state from this service.
+
+## Mapping contract
+
+Request and response fields use the core `ValueBinding` model:
+
+- `path`: read a dot-notation path (brackets are literal segment characters);
+- `handlebars`: render a Handlebars template;
+- `jsonata`: evaluate a JSONata expression.
+
+Every request mapping receives this stable context:
+
+```ts
+{
+  workspace,
+  parentRecord,       // undefined when the catalog has no parent
+  oid,
+  brand,              // resolved brand name
+  trigger: {
+    catalog,
+    event,
+    idempotencyKey?,
+    parentRecordOid?
+  },
+  now,                // ISO-8601 string
+  translationService
+}
 ```
 
-Note: The first time the stack runs it may take some time as yarn initialises the hook within ReDBox Portal. All subsequent runs should be faster
+Response mappings receive the same values plus `response`, containing the
+normalized ServiceNow response. New response mappings should use paths such as
+`response.result.number`. A temporary raw-response root alias is retained for
+older `result.*` mappings.
 
-### Usage #2
+Mappings are applied to clones and reject prototype-polluting destination
+paths. Workspace and parent mappings are independent. Metadata is written only
+when the corresponding mapping list is non-empty. The service never assigns a
+hard-coded status; status changes must be expressed as ordinary response
+mappings, binding defaults, or expressions.
 
-Using Vagrant : https://github.com/moisbo/vagrant-redbox-dev
+## Parent records
 
-And configure sync
+Parent handling is optional and relationship-neutral. A caller can supply
+`parentRecordOid`, or the catalog can resolve it from `parentRecord.oid`.
+When configured, the OID must be non-empty and the record must exist. The
+service loads the parent through `RecordsService`, associates the workspace
+through `WorkspaceService.addWorkspaceToRecord`, and applies optional parent
+response mappings through `RecordsService.updateMeta`.
 
-config.vm.synced_folder "{source}/sails-hook-redbox-catalog", "/opt/hooks/sails-hook-redbox-catalog", id: "catalog"
+Catalogs without a parent binding perform no parent lookup, association, or
+parent update. Parent identity is resolved through the configured binding.
 
-## Example:
+## Response normalization
 
-Service Catalog as stand alone hook:
+With `responseNormalization.parseJsonString` enabled (the default), an HTTP
+response whose root value is a JSON-encoded string is parsed before response
+mapping. Object and array responses are unchanged. A root string that is not
+valid JSON is preserved as a string.
 
-http://localhost:1500/default/{branding}/catalog/edit?rdmp={redbox_oid}
+OAuth and catalog responses are decompressed with strict zlib defaults before
+JSON parsing, including Brotli, gzip, and deflate. A corrupt or truncated catalog
+response fails with a non-retryable `CatalogRequestError` and an `Uncertain`
+submission state: ServiceNow may already have accepted the order, so replaying
+it automatically could create a duplicate. Normal failure audits are retained
+without the compressed payload or request credentials. Reconcile the upstream
+order before retrying an uncertain submission.
 
-![](./support/doc/images/service-catalog.png)
+## Auditing and idempotency
 
-Or integrated into rdmp
+The integration audit records the overall submission and nested phases for
+parent lookup, association, ServiceNow HTTP work, workspace update, parent
+update, and idempotency decisions. Request summaries include the selected
+catalog, trigger event, optional parent OID, and stable idempotency key, but not
+credentials or full request bodies.
 
-![](./support/doc/images/service-catalog-in-rdmp.png)
+Idempotency is disabled by default. When enabled, a key must come from the
+trigger or the configured binding. The hook-owned
+`ServicenowCatalogIdempotency` Waterline model is the atomic durable claim
+ledger. Its primary key is derived from an unambiguous JSON-array encoding of
+brand ID, record OID, catalog, and idempotency key. Integration audit history
+provides the submission evidence used to reconcile claim state:
 
-Example: eResearch Storage
+- a prior completed key is rejected as a duplicate;
+- a prior started/interrupted key is rejected because ServiceNow may have
+  accepted the request;
+- a prior failed trace can be retried;
+- an in-process guard also rejects concurrent duplicates in one portal process.
 
-![](./support/doc/images/service-catalog-storage.png)
+Claims move through `claimed`, `completed`, `failed`, and `uncertain`.
+A `claimed` row is leased for the greater of five minutes or the configured
+`totalTimeoutMs` plus a one-minute safety margin, so the lease covers the
+complete orchestration side-effect window. After expiry, one process atomically
+takes reconciliation ownership and checks ServiceNow-scoped audit history
+before doing anything external: a successful trace becomes `completed`, a
+started or interrupted trace becomes `uncertain`, and a clear trace may be
+submitted again. If reconciliation lookup itself fails, a recovered stale
+claim becomes `uncertain` rather than retryable.
 
+Completed and uncertain rows have no automatic retention expiry because deleting
+them re-enables their keys. Operators may remove them only when the corresponding
+idempotency-key protection window has deliberately ended. Failed rows are
+retained until atomically reclaimed by a later attempt.
 
+## Legacy compatibility endpoints
 
+These routes remain for compatibility only and are not the reusable save-hook
+API:
+
+- `POST /:branding/:portal/ws/catalog/rdmp`
+- `POST /:branding/:portal/ws/catalog/request`
+- `GET /:branding/:portal/ws/catalog/info`
+
+They continue to use the isolated legacy `sails.config.workspaces.catalog`
+settings and their existing authorization/response conventions. The request
+endpoint no longer falls back to hook-owned record or workflow names:
+`workspaces.catalog.recordType` and `workspaces.catalog.workflowStage` must
+be configured when that endpoint creates a workspace.
+
+The historical `legacy-form-config/` and `angular/catalog/` directories are
+migration evidence only. They are not compiled, registered, or included in the
+published package.
+
+## Development
+
+Use the hook archetype scripts:
+
+```bash
+npm install --include=dev
+npm run compile
+npm run test:unit
+npm run test:integration:mocha
+npm run test:integration:bruno
+```
+
+Set `REDBOX_PORTAL_IMAGE` to select the portal image for both integration suites
+(for example `qcifengineering/redbox-portal:develop-pdfgen-20261022`). Use a unique
+`COMPOSE_PROJECT_NAME` for isolated runs.
+
+The integration suites build and lift a real ReDBox portal with MongoDB and
+Solr. Mocha covers the service orchestration and Bruno covers authorization for
+every retained compatibility route. Clean their Docker resources when needed:
+
+```bash
+npm run test:integration:mocha:clean
+npm run test:integration:bruno:clean
+```
+
+## CI and releases
+
+CircleCI compiles and runs the unit suite for every branch. Stable Git tags
+matching `vMAJOR.MINOR.PATCH` publish the matching package version with the npm
+`latest` dist-tag.
+
+Beta packages are published by triggering a CircleCI pipeline with
+`npm_publish_mode=beta`, a stable base `npm_publish_version`, and an
+`npm_publish_dist_tag` such as `beta`, `next`, or `alpha`.
+
+### Shared parent/resource dispatch claims
+
+A named catalog can opt into shared parent/resource dispatch claims:
+
+```json
+"dispatchClaim": {
+  "enabled": true,
+  "resources": { "kind": "path", "path": "workspace.metadata.requestedResources" }
+}
+```
+
+This requires `parentRecord.oid` and enabled request idempotency. The plugin claims each resource string under **brand + parent OID + resource**, independently of catalog/request OID. Acquire all options before associating the request or sending HTTP. Success and uncertain outcomes retain ownership; database failures prevent dispatch. Other catalogs retain their existing behaviour when this setting is absent/false. Legacy `/ws/catalog/request` ordering is unavailable for brands opting into shared claims, because that route has no persisted request identity before HTTP.
+
+Customer hooks still enforce authoritative eligibility and permissions, including requests created before these claim rows existed. Keep the ordinary awaited post-save call; no queue is introduced. The existing same-request replay ledger remains separate.
+
+`releaseRequestClaims` is a server-side post-delete hook, not an HTTP reset API. It verifies a completed deleted lifecycle, the brand administrator role, parent edit access and removal of the parent link, then releases only that deleted request's owned claims. Incomplete dispatches remain occupied. An ambiguous HTTP result never authorises a second request automatically. As with other external integrations, the database and remote HTTP call are not one atomic transaction.
