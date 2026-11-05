@@ -49,6 +49,8 @@ describe('ServiceNow catalog hook integration', function () {
       })));
     });
     const originalConfig = Reflect.get(sails.config, 'servicenowCatalog');
+    const originalDefaults = sails.config.brandingConfigurationDefaults;
+    const originalBrandingAware = sails.config.brandingAware;
     const originalRecordsService = RecordsService;
     const originalWorkspaceService = WorkspaceService;
     const workspaceUpdates: Array<{ oid: string; record: Record<string, unknown> }> = [];
@@ -82,10 +84,18 @@ describe('ServiceNow catalog hook integration', function () {
           source: { kind: 'path', path: 'response.result.sys_id' }
         }]
       };
-      Reflect.set(sails.config, 'servicenowCatalog', {
+      const brandDefaults = {
         enabled: true,
         catalogs: { 'integration-success': definition }
+      };
+      Reflect.deleteProperty(sails.config, 'servicenowCatalog');
+      Reflect.set(sails.config, 'brandingConfigurationDefaults', {
+        ...originalDefaults, servicenowCatalog: brandDefaults
       });
+      // Model the fresh core cache after merging hook defaults, with no stored row.
+      const brandSettings = { servicenowCatalog: brandDefaults };
+      Object.defineProperty(brandSettings, Symbol.for('redbox.appConfig.presentKeys'), { value: new Set() });
+      Reflect.set(sails.config, 'brandingAware', () => brandSettings);
       let stored: Record<string, unknown> | undefined;
       Reflect.set(globalThis, 'RecordsService', {
         mutateMetaInternal: async (options: { oid: string; mutate: (snapshot: typeof submittedWorkspace) => unknown }) => {
@@ -181,6 +191,8 @@ describe('ServiceNow catalog hook integration', function () {
       Reflect.set(globalThis, 'RecordsService', originalRecordsService);
       Reflect.set(globalThis, 'WorkspaceService', originalWorkspaceService);
       Reflect.set(sails.config, 'servicenowCatalog', originalConfig);
+      Reflect.set(sails.config, 'brandingConfigurationDefaults', originalDefaults);
+      Reflect.set(sails.config, 'brandingAware', originalBrandingAware);
       await testServer.close();
     }
   });

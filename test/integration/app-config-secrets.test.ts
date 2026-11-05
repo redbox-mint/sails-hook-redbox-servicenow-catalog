@@ -12,6 +12,7 @@ const { APP_CONFIG_SECRET_MASK, APP_CONFIG_SECRET_CLEAR } = require(
 ) as { APP_CONFIG_SECRET_MASK: string; APP_CONFIG_SECRET_CLEAR: string };
 
 type CatalogConfig = { enabled: boolean; catalogs: Record<string, ServiceNowCatalogDefinition> };
+type FormConfig = { enabled: boolean; catalogs: Array<ServiceNowCatalogDefinition & { name: string }> };
 
 function withSecrets(value: string): ServiceNowCatalogDefinition {
   const catalog = createDefaultCatalogDefinition();
@@ -41,7 +42,7 @@ function expectSecrets(catalog: ServiceNowCatalogDefinition, value?: string): vo
 describe('ServiceNow catalog AppConfig secret lifecycle', function () {
   // Exercise real core masking/merging and Mongo persistence, with the model
   // registered by the installed plugin. Do not reimplement core path expansion.
-  for (const catalogName of ['storage-request', 'storage.request[1]']) {
+  for (const catalogName of ['storage-request', 'storage-request-2']) {
     describe(catalogName, function () {
       let brand: ReturnType<typeof BrandingService.getDefault>;
       let originalHookConfig: unknown;
@@ -57,9 +58,9 @@ describe('ServiceNow catalog AppConfig secret lifecycle', function () {
         return rows[0].configData as CatalogConfig;
       }
 
-      async function form(): Promise<CatalogConfig> {
+      async function form(): Promise<FormConfig> {
         const result = await AppConfigService.getAppConfigForm(brand, configKey);
-        return result.model as CatalogConfig;
+        return result.model as FormConfig;
       }
 
       beforeEach(function () {
@@ -78,12 +79,22 @@ describe('ServiceNow catalog AppConfig secret lifecycle', function () {
         await AppConfigService.bootstrap();
       });
 
+      it('round-trips and preserves masked legacy top-level configuration', async function () {
+        const legacy = { ...withSecrets('legacy-fixture'), enabled: true, responseFields: [] };
+        await AppConfigService.createOrUpdateConfig(brand, configKey, legacy);
+        const result = await AppConfigService.getAppConfigForm(brand, configKey);
+        expectSecrets(result.model as ServiceNowCatalogDefinition, APP_CONFIG_SECRET_MASK);
+        await AppConfigService.createOrUpdateConfig(brand, configKey, result.model as Record<string, unknown>);
+        const rows = await AppConfig.find({ branding: brand.id, configKey }) as Array<{ configData: unknown }>;
+        expect(JSON.stringify(rows[0].configData) === JSON.stringify(legacy)).to.equal(true);
+      });
+
       it('masks every stored secret in getAppConfigForm without changing backend values', async function () {
         await AppConfigService.createOrUpdateConfig(brand, configKey, config('stored-secret'));
         // Reload from Mongo so this also covers stored values loaded at startup.
         await AppConfigService.bootstrap();
 
-        expectSecrets((await form()).catalogs[catalogName], APP_CONFIG_SECRET_MASK);
+        expectSecrets((await form()).catalogs.find(entry => entry.name === catalogName)!, APP_CONFIG_SECRET_MASK);
         expectSecrets((await stored()).catalogs[catalogName], 'stored-secret');
         const backend = Reflect.get(AppConfigService.getAppConfigurationForBrand(brand.name), configKey) as CatalogConfig;
         expectSecrets(backend.catalogs[catalogName], 'stored-secret');
@@ -93,13 +104,13 @@ describe('ServiceNow catalog AppConfig secret lifecycle', function () {
         await AppConfigService.createOrUpdateConfig(brand, configKey, config('stored-secret'));
         const masked = await form();
         // Explicit assertion prevents a broken masker hiding a broken merger.
-        expectSecrets(masked.catalogs[catalogName], APP_CONFIG_SECRET_MASK);
-        masked.catalogs[catalogName].connection.url = 'https://example.invalid/changed';
+        expectSecrets(masked.catalogs.find(entry => entry.name === catalogName)!, APP_CONFIG_SECRET_MASK);
+        masked.catalogs.find(entry => entry.name === catalogName)!.connection.url = 'https://example.invalid/changed';
         await AppConfigService.createOrUpdateConfig(brand, configKey, masked);
 
         expectSecrets((await stored()).catalogs[catalogName], 'stored-secret');
         expect((await stored()).catalogs[catalogName].connection.url).to.equal('https://example.invalid/changed');
-        expectSecrets(masked.catalogs[catalogName], APP_CONFIG_SECRET_MASK);
+        expectSecrets(masked.catalogs.find(entry => entry.name === catalogName)!, APP_CONFIG_SECRET_MASK);
       });
 
       it('omits placeholders without stored secrets on create and update, preserving environment fallback', async function () {
@@ -119,12 +130,12 @@ describe('ServiceNow catalog AppConfig secret lifecycle', function () {
       it('replaces every stored secret with a new real form value', async function () {
         await AppConfigService.createOrUpdateConfig(brand, configKey, config('stored-secret'));
         const edited = await form();
-        edited.catalogs[catalogName] = withSecrets('replacement-secret');
+        edited.catalogs[0] = { name: catalogName, ...withSecrets('replacement-secret') };
         const saved = await AppConfigService.createOrUpdateConfig(brand, configKey, edited) as CatalogConfig;
 
         expectSecrets((await stored()).catalogs[catalogName], 'replacement-secret');
         expectSecrets(saved.catalogs[catalogName], APP_CONFIG_SECRET_MASK);
-        expectSecrets((await form()).catalogs[catalogName], APP_CONFIG_SECRET_MASK);
+        expectSecrets((await form()).catalogs.find(entry => entry.name === catalogName)!, APP_CONFIG_SECRET_MASK);
       });
 
       it('clears stored overrides with APP_CONFIG_SECRET_CLEAR and restores environment fallback', async function () {

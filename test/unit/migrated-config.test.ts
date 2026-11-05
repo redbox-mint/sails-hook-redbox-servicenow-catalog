@@ -33,12 +33,12 @@ describe('named ServiceNow catalog configuration', function () {
     expect(definition.responseFields).to.deep.equal({ workspace: [], parentRecord: [] });
   });
 
-  it('validates the canonical named-catalog schema', function () {
+  it('declares the named-catalog form schema', function () {
     const rootSchema = SERVICENOW_CATALOG_SCHEMA as {
       required: string[];
       properties: {
         catalogs: {
-          additionalProperties: {
+          items: {
             required: string[];
             properties: Record<string, unknown>;
           }
@@ -46,7 +46,7 @@ describe('named ServiceNow catalog configuration', function () {
       };
     };
     expect(rootSchema.required).to.deep.equal(['enabled', 'catalogs']);
-    expect(rootSchema.properties.catalogs.additionalProperties.required).to.include.members([
+    expect(rootSchema.properties.catalogs.items.required).to.include.members([
       'enabled',
       'connection',
       'oauth',
@@ -54,7 +54,7 @@ describe('named ServiceNow catalog configuration', function () {
       'requestFields',
       'responseFields'
     ]);
-    expect(rootSchema.properties.catalogs.additionalProperties.properties)
+    expect(rootSchema.properties.catalogs.items.properties)
       .to.have.property('requestFilters');
   });
 
@@ -69,7 +69,7 @@ describe('named ServiceNow catalog configuration', function () {
       'oauth.password',
       'oauth.refreshToken'
     ]);
-    expect(SERVICENOW_CATALOG_CONFIG_MODEL).not.to.have.property('formAdapter');
+    expect(SERVICENOW_CATALOG_CONFIG_MODEL).to.have.property('formAdapter');
   });
 
   it('keeps secret declarations for the supported temporary single-catalog shape', function () {
@@ -135,5 +135,75 @@ describe('named ServiceNow catalog configuration', function () {
     expect(resolved.catalog?.connection.url).to.equal('https://brand.example/catalog');
     expect(resolved.catalog?.connection.timeoutMs).to.equal(1000);
     expect(resolved.catalog?.requestFields).to.have.length(1);
+  });
+});
+
+describe('catalog form adapter', function () {
+  const adapter = configModule.SERVICENOW_CATALOG_FORM_ADAPTER;
+
+  it('round-trips multiple partial catalogs and legacy inputs unchanged', function () {
+    for (const stored of [
+      { enabled: true, catalogs: { first: createDefaultCatalogDefinition(), second: { enabled: false } } },
+      { enabled: false, catalogs: {} },
+      { enabled: true, connection: { url: 'https://legacy.example' }, responseFields: [] },
+      { oauth: {}, bodyTemplate: { untouched: true } }
+    ]) {
+      expect(adapter.fromForm(adapter.toForm(stored))).to.deep.equal(stored);
+    }
+  });
+
+  it('rejects empty, duplicate and unsafe catalog names', function () {
+    for (const name of ['', ' ', '__proto__', 'constructor', 'prototype', 'a.b', 'a[0]', 'a]']) {
+      expect(() => adapter.fromForm({ catalogs: [{ name }] })).to.throw();
+    }
+    expect(() => adapter.fromForm({ catalogs: [{ name: 'same' }, { name: 'same' }] })).to.throw();
+  });
+
+  it('provides an array schema with a required name and catalog properties', function () {
+    const schema = SERVICENOW_CATALOG_SCHEMA.properties.catalogs;
+    expect(schema.type).to.equal('array');
+    expect(schema.items.required).to.include('name');
+    expect(schema.items.properties.name.type).to.equal('string');
+    expect(schema.items.properties).to.have.property('connection');
+  });
+
+  it('core wildcard matching masks array entries and restores stored map paths before merging', function () {
+    const stored = { enabled: true, catalogs: { first: createDefaultCatalogDefinition(), second: createDefaultCatalogDefinition() } };
+    for (const definition of Object.values(stored.catalogs)) {
+      definition.oauth.clientSecret = String(Math.random());
+      definition.oauth.password = String(Math.random());
+      definition.oauth.refreshToken = String(Math.random());
+      definition.connection.headers.Authorization = String(Math.random());
+    }
+    const form = adapter.toForm(structuredClone(stored));
+    let count = 0;
+    // Core AppConfigService.getSecretPaths expands own keys, including array indices.
+    const visit = (value: unknown, parts: string[]) => {
+      if (value == null || typeof value !== 'object') return;
+      const [part, ...rest] = parts;
+      for (const key of part === '*' ? Object.keys(value) : [part]) {
+        if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+        if (rest.length) visit(Reflect.get(value, key), rest);
+        else { Reflect.set(value, key, '__REDACTED__'); count++; }
+      }
+    };
+    for (const path of configModule.SERVICENOW_CATALOG_SECRET_FIELDS) visit(form, path.split('.'));
+    expect(count).to.equal(8);
+    const incoming = adapter.fromForm(form) as typeof stored;
+    for (const name of ['first', 'second'] as const) {
+      const definition = incoming.catalogs[name];
+      expect(definition.oauth.clientSecret === '__REDACTED__').to.equal(true);
+      expect(definition.oauth.password === '__REDACTED__').to.equal(true);
+      expect(definition.oauth.refreshToken === '__REDACTED__').to.equal(true);
+      expect(definition.connection.headers.Authorization === '__REDACTED__').to.equal(true);
+      // Core merges placeholders against the original stored map after fromForm.
+      for (const key of ['clientSecret', 'password', 'refreshToken'] as const) {
+        if (definition.oauth[key] === '__REDACTED__') Reflect.set(definition.oauth, key, stored.catalogs[name].oauth[key]);
+      }
+      if (definition.connection.headers.Authorization === '__REDACTED__') {
+        definition.connection.headers.Authorization = stored.catalogs[name].connection.headers.Authorization;
+      }
+      expect(JSON.stringify(definition) === JSON.stringify(stored.catalogs[name])).to.equal(true);
+    }
   });
 });

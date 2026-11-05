@@ -315,10 +315,17 @@ export const SERVICENOW_CATALOG_SCHEMA = {
   properties: {
     enabled: { type: 'boolean', title: 'Enabled', default: false },
     catalogs: {
-      type: 'object',
+      type: 'array',
       title: 'Named catalogs',
-      additionalProperties: CATALOG_DEFINITION_SCHEMA,
-      default: {}
+      items: {
+        ...CATALOG_DEFINITION_SCHEMA,
+        properties: {
+          name: { type: 'string', title: 'Catalog name', minLength: 1 },
+          ...CATALOG_DEFINITION_SCHEMA.properties
+        },
+        required: ['name', ...CATALOG_DEFINITION_SCHEMA.required]
+      },
+      default: []
     }
   },
   required: ['enabled', 'catalogs']
@@ -343,11 +350,51 @@ export const SERVICENOW_CATALOG_SECRET_FIELDS = [
   'oauth.refreshToken'
 ];
 
+/** Only change the catalog container, retaining partial and legacy data verbatim. */
+export const SERVICENOW_CATALOG_FORM_ADAPTER = {
+  toForm(model: unknown): unknown {
+    if (model == null || typeof model !== 'object' || Array.isArray(model)) return model;
+    const data = model as Record<string, unknown>;
+    const catalogs = data.catalogs;
+    if (catalogs == null || typeof catalogs !== 'object' || Array.isArray(catalogs)) return model;
+    return {
+      ...data,
+      catalogs: Object.entries(catalogs).map(([name, definition]) => ({
+        ...(definition as Record<string, unknown>), name
+      }))
+    };
+  },
+  fromForm(model: unknown): unknown {
+    if (model == null || typeof model !== 'object' || Array.isArray(model)) return model;
+    const data = model as Record<string, unknown>;
+    // API callers and legacy stored configurations may already use the stored shape.
+    if (!Array.isArray(data.catalogs)) return model;
+    const catalogs: Record<string, unknown> = {};
+    for (const entry of data.catalogs) {
+      if (entry == null || typeof entry !== 'object' || Array.isArray(entry)) {
+        throw new Error('Catalog entry must be an object');
+      }
+      const { name, ...definition } = entry as Record<string, unknown>;
+      // Match core's safe configuration keys, also rejecting whitespace-only names.
+      if (typeof name !== 'string' || !name.trim() || /[.[\]]/.test(name)
+        || ['__proto__', 'constructor', 'prototype'].includes(name)) {
+        throw new Error('Catalog name must be a non-empty safe configuration name');
+      }
+      if (Object.prototype.hasOwnProperty.call(catalogs, name)) {
+        throw new Error('Duplicate catalog name');
+      }
+      catalogs[name] = definition;
+    }
+    return { ...data, catalogs };
+  }
+};
+
 export const SERVICENOW_CATALOG_CONFIG_MODEL = {
   key: SERVICENOW_CATALOG_CONFIG_KEY,
   modelName: 'ServiceNowCatalogAppConfig',
   title: 'ServiceNow Catalog',
   class: ServiceNowCatalogAppConfig,
   schema: SERVICENOW_CATALOG_SCHEMA,
-  secretFields: SERVICENOW_CATALOG_SECRET_FIELDS
+  secretFields: SERVICENOW_CATALOG_SECRET_FIELDS,
+  formAdapter: SERVICENOW_CATALOG_FORM_ADAPTER
 };

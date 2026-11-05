@@ -882,9 +882,13 @@ export namespace Services {
         const brandSettings = brandingAware?.(brandName);
         if (brandSettings != null && typeof brandSettings === 'object') {
           const presentKeys = Reflect.get(brandSettings, APP_CONFIG_PRESENT_KEYS_SYMBOL);
-          const hasStoredBrandConfig = !(presentKeys instanceof Set)
+          // Hook/deployment brand defaults are real configuration too. The marker
+          // tracks stored rows only; bare class defaults must still yield to the hook.
+          const hasBrandConfig = isPlainObject(
+            Reflect.get(sailsConfig.brandingConfigurationDefaults ?? {}, SERVICENOW_CATALOG_CONFIG_KEY)
+          ) || !(presentKeys instanceof Set)
             || presentKeys.has(SERVICENOW_CATALOG_CONFIG_KEY);
-          brandConfig = hasStoredBrandConfig
+          brandConfig = hasBrandConfig
             ? Reflect.get(brandSettings, SERVICENOW_CATALOG_CONFIG_KEY)
             : undefined;
         }

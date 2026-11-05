@@ -1217,6 +1217,41 @@ describe('ServiceNow catalog orchestration', function () {
     expect(requests).to.equal(1);
   });
 
+  it('uses hook-supplied brand defaults without a stored row or top-level config', async function () {
+    let requests = 0;
+    let receivedHeader: unknown;
+    const testServer = await listen(async (_req, res) => {
+      requests++;
+      receivedHeader = _req.headers.authorization;
+      res.setHeader('Content-Type', 'application/json');
+      res.end('{}');
+    });
+    activeServer = testServer.server;
+    const config = createDefaultCatalogDefinition();
+    config.connection.url = testServer.url + '/catalog';
+    config.oauth.clientSecret = String(Math.random());
+    config.connection.headers.Authorization = String(Math.random());
+    configureBrandAndCatalog(config);
+    config.oauth.url = 'https://brand.example/oauth';
+    const defaults = { enabled: true, catalogs: { 'storage-new': config } };
+    const settings = { servicenowCatalog: defaults };
+    Object.defineProperty(settings, Symbol.for('redbox.appConfig.presentKeys'), { value: new Set() });
+    const sailsConfig = getTestSails().config;
+    Reflect.deleteProperty(sailsConfig, 'servicenowCatalog');
+    Reflect.set(sailsConfig, 'brandingConfigurationDefaults', { servicenowCatalog: defaults });
+    Reflect.set(sailsConfig, 'brandingAware', () => settings);
+    try {
+      setHookTestGlobal('IntegrationAuditService', makeAuditService());
+      const result = await service.submitRequest('brand-defaults', workspace(),
+        { catalog: 'storage-new', event: 'create' }, undefined);
+      expect(result).to.have.property('metadata');
+      expect(requests).to.equal(1);
+      expect(receivedHeader === config.connection.headers.Authorization).to.equal(true);
+    } finally {
+      Reflect.deleteProperty(sailsConfig, 'brandingConfigurationDefaults');
+    }
+  });
+
   it('fails safely instead of falling back when the workspace brand is unknown', async function () {
     const config = createDefaultCatalogDefinition();
     config.connection.url = 'https://example.service-now.com/catalog';
