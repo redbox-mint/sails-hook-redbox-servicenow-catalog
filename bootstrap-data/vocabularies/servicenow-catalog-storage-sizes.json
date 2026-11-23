@@ -1,0 +1,11 @@
+{
+  "name": "ServiceNow Catalog Storage Sizes",
+  "slug": "servicenow-catalog-storage-sizes",
+  "description": "Storage sizes available when creating a ServiceNow catalog request.",
+  "type": "flat",
+  "entries": [
+    { "label": "@servicenow-catalog-storage-size-less-than-1tb", "value": "@servicenow-catalog-storage-size-less-than-1tb", "order": 0 },
+    { "label": "@servicenow-catalog-storage-size-1-5tb", "value": "@servicenow-catalog-storage-size-1-5tb", "order": 1 },
+    { "label": "@servicenow-catalog-storage-size-more-than-5tb", "value": "@servicenow-catalog-storage-size-more-than-5tb", "order": 2 }
+  ]
+}

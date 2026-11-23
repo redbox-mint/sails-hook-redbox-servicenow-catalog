@@ -1,0 +1,25 @@
+meta {
+  name: Login for protected catalog
+  type: http
+  seq: 4
+}
+post {
+  url: {{host}}/user/login_local
+  body: json
+  auth: none
+}
+headers {
+  Content-Type: application/json
+  X-Source: jsclient
+}
+body:json {
+  {"username":"admin","password":"rbadmin","branding":"default","portal":"rdmp"}
+}
+tests {
+  test("Administrator authenticates", () => {
+    expect(res.getStatus()).to.equal(200);
+    expect(res.getBody().user.username).to.equal("admin");
+    const cookies = res.headers['set-cookie'];
+    if (cookies) bru.setVar('catalogCookie', (Array.isArray(cookies) ? cookies : [cookies]).map(c => c.split(';')[0]).join('; '));
+  });
+}
