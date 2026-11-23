@@ -152,6 +152,7 @@ export function makeLiveClient(
 ): ServiceNowClient {
   const { oid } = runContext;
   const retryStatusCodes = config.connection.retry.retryOnStatusCodes;
+  const defaultTransforms = [axios.defaults.transformRequest ?? []].flat();
 
   const performRequest = (
     body: Record<string, unknown>,
@@ -168,6 +169,17 @@ export function makeLiveClient(
             ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {})
           },
           data: body,
+          transformRequest: [...defaultTransforms, (data: unknown, headers) => {
+            // Capture the serialized body after OAuth and immediately before HTTP dispatch.
+            if (runContext.parentAudit != null) {
+              const contentType = headers.getContentType();
+              runContext.catalogRequest = {
+                body: typeof data === 'string' ? data : undefined,
+                contentType: typeof contentType === 'string' ? contentType : undefined
+              };
+            }
+            return data;
+          }],
           signal,
           decompress: false,
           responseType: 'arraybuffer',

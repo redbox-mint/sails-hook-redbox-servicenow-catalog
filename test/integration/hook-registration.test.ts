@@ -70,6 +70,10 @@ describe('ServiceNow catalog hook integration', function () {
       definition.parentRecord = {
         oid: { kind: 'path', path: 'workspace.metadata.parentOid' }
       };
+      definition.bodyTemplate.variables = {
+        contributors: [{ name: 'Ada Example', email: 'ada@example.org' }],
+        catalogApiKey: 'synthetic-credential'
+      };
       definition.requestFields = [{
         destination: 'variables.event',
         source: { kind: 'path', path: 'trigger.event' }
@@ -181,9 +185,26 @@ describe('ServiceNow catalog hook integration', function () {
         }
         await new Promise(resolve => setTimeout(resolve, 100));
       }
-      expect(auditRows.some(row =>
+      const parentSuccess = auditRows.find(row =>
         row.integrationAction === 'submitCatalogRequest' && row.status === 'success'
-      )).to.equal(true);
+      );
+      expect(parentSuccess?.requestSummary).to.deep.include({
+        catalog: 'integration-success',
+        event: 'update',
+        idempotencyKey: 'integration-key',
+        parentRecordOid: 'integration-parent',
+        brandName: defaultBrand.name,
+        url: definition.connection.url,
+        requestBody: {
+          sysparm_quantity: '1',
+          get_portal_messages: 'true',
+          variables: {
+            contributors: [{ name: 'Ada Example', email: 'ada@example.org' }],
+            catalogApiKey: 'REDACTED',
+            event: 'update'
+          }
+        }
+      });
       expect(auditRows.some(row =>
         row.integrationAction === 'parentMetadataUpdate' && row.status === 'success'
       )).to.equal(true);

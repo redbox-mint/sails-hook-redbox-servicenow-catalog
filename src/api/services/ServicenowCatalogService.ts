@@ -613,14 +613,36 @@ export namespace Services {
       exit: Exit.Exit<SubmitSuccess, ServiceNowCatalogError>,
       idempotencyClaim: CatalogIdempotencyClaim | undefined
     ): Promise<WorkspaceRecord> {
+      // Parse the outbound snapshot once, after all HTTP attempts have finished.
+      const catalogRequest = runContext.catalogRequest;
+      let bodySummary: Record<string, unknown> | undefined;
+      if (catalogRequest != null) {
+        bodySummary = {
+          requestBodyOmitted: true,
+          requestBodyContentType: catalogRequest.contentType
+        };
+        if (catalogRequest.body !== undefined) {
+          try {
+            bodySummary = { requestBody: JSON.parse(catalogRequest.body) };
+          } catch {
+            // A custom connection can select a non-JSON request encoding.
+          }
+        }
+      }
+      // The admin audit includes catalog variables such as requester contact details.
+      // Core applies its existing credential redaction when building the entry.
+      const requestSummary = {
+        catalog: runContext.catalog,
+        event: runContext.event,
+        idempotencyKey: runContext.idempotencyKey,
+        ...bodySummary
+      };
       if (Exit.isSuccess(exit)) {
         completeCatalogAudit(runContext.parentAudit, {
           message: 'ServiceNow catalog request completed.',
           httpStatusCode: exit.value.httpResult.statusCode,
           requestSummary: {
-            catalog: runContext.catalog,
-            event: runContext.event,
-            idempotencyKey: runContext.idempotencyKey,
+            ...requestSummary,
             parentRecordOid: runContext.parentRecordOid
           },
           responseSummary: isPlainObject(exit.value.httpResult.data)
@@ -636,9 +658,7 @@ export namespace Services {
         failCatalogAudit(runContext.parentAudit, 'interrupted', {
           message: 'ServiceNow catalog request was interrupted during shutdown.',
           requestSummary: {
-            catalog: runContext.catalog,
-            event: runContext.event,
-            idempotencyKey: runContext.idempotencyKey,
+            ...requestSummary,
             submissionCertainty: 'uncertain'
           }
         });
@@ -664,9 +684,7 @@ export namespace Services {
           message,
           responseSummary: this.responseSummaryFor(error),
           requestSummary: {
-            catalog: runContext.catalog,
-            event: runContext.event,
-            idempotencyKey: runContext.idempotencyKey,
+            ...requestSummary,
             ...(uncertain ? { submissionCertainty: 'uncertain' } : {})
           }
         });
@@ -689,9 +707,7 @@ export namespace Services {
       failCatalogAudit(runContext.parentAudit, defect, {
         message: 'ServiceNow catalog request failed with an unexpected defect.',
         requestSummary: {
-          catalog: runContext.catalog,
-          event: runContext.event,
-          idempotencyKey: runContext.idempotencyKey,
+          ...requestSummary,
           submissionCertainty: 'uncertain'
         }
       });

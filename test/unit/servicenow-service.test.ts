@@ -93,6 +93,13 @@ function makeAuditService(rows: AuditRow[] = []) {
   };
 }
 
+function finalRequestSummary(context: IntegrationAuditContext, details?: Record<string, unknown>) {
+  return {
+    ...context.requestSummary,
+    ...(details?.requestSummary as Record<string, unknown> | undefined)
+  };
+}
+
 function configureBrandAndCatalog(
   config: ServiceNowCatalogDefinition,
   brandCatalogOverride?: Record<string, unknown>
@@ -183,7 +190,9 @@ describe('ServiceNow catalog orchestration', function () {
     { name: 'defect', tag: 'Defect', code: '500', uncertain: true, dispatched: true }
   ]) {
     it(`throws typed ${scenario.name} failure after status, audit, ledger and resource claim cleanup`, async function () {
+      const requestPaths: Array<string | undefined> = [];
       const endpoint = await listen(async (req, res) => {
+        requestPaths.push(req.url);
         req.resume();
         if (scenario.name === 'transport') { req.socket.destroy(); return; }
         if (scenario.name === 'request timeout') return;
@@ -193,7 +202,7 @@ describe('ServiceNow catalog orchestration', function () {
       });
       activeServer = endpoint.server;
       const config = createDefaultCatalogDefinition();
-      config.connection.url = endpoint.url;
+      config.connection.url = endpoint.url + '/catalog';
       config.connection.timeoutMs = 50;
       config.connection.retry.maxAttempts = 1;
       config.parentRecord = { oid: { kind: 'path', path: 'workspace.metadata.parentOid' } };
@@ -201,7 +210,7 @@ describe('ServiceNow catalog orchestration', function () {
       config.dispatchClaim = { enabled: true, resources: { kind: 'path', path: 'workspace.metadata.resources' } };
       config.responseFields.workspace = [{ destination: 'metadata.number', source: { kind: 'path', path: 'response.result.number' } }];
       if (scenario.name === 'request mapping') config.requestFields = [{ destination: '__proto__.unsafe', source: { kind: 'path', path: 'oid' } }];
-      if (scenario.name === 'OAuth') config.oauth = { enabled: true, url: endpoint.url, clientId: 'client', clientSecret: 'private-client-secret', grantType: 'client_credentials' };
+      if (scenario.name === 'OAuth') config.oauth = { enabled: true, url: endpoint.url + '/oauth', clientId: 'client', clientSecret: 'private-client-secret', grantType: 'client_credentials' };
       if (scenario.name === 'parent write') config.responseFields.parentRecord = config.responseFields.workspace;
       if (scenario.name === 'defect') {
         const httpModule = require('../../dist/api/services/servicenow/http') as typeof import('../../src/api/services/servicenow/http');
@@ -255,7 +264,15 @@ describe('ServiceNow catalog orchestration', function () {
         expect(stored.metadata.number, 'committed mappings survive read failure and status write').to.equal('REQ-FAILURE');
       }
       expect([...ledger.rows.values()][0].status).to.equal(scenario.uncertain ? 'uncertain' : 'failed');
-      expect(audit.failAudit.mock.calls.some(call => call.arguments[0].integrationAction === 'submitCatalogRequest')).to.equal(true);
+      const parentFailure = audit.failAudit.mock.calls.find(call => call.arguments[0].integrationAction === 'submitCatalogRequest');
+      expect(parentFailure).to.exist;
+      if (scenario.name === 'OAuth') {
+        expect(requestPaths).to.deep.equal(['/oauth']);
+        const [context, , details] = parentFailure!.arguments;
+        expect(finalRequestSummary(context, details)).to.include({
+          catalog: 'storage-new', event: 'create', idempotencyKey: 'failure-key'
+        }).and.not.to.have.any.keys('requestBody', 'requestBodyOmitted', 'requestBodyContentType');
+      }
       if (scenario.dispatched) expect([...resources.rows.values()][0].state).to.equal('uncertain');
       else expect(resources.rows.size).to.equal(0);
       for (const call of mutateMetaInternal.mock.calls) {
@@ -313,6 +330,7 @@ describe('ServiceNow catalog orchestration', function () {
       retryOnStatusCodes: []
     };
     config.parentRecord = { oid: { kind: 'path', path: 'workspace.metadata.parentOid' } };
+    config.idempotency = { enabled: true };
     config.requestFields = [
       {
         destination: 'variables.short_description',
@@ -325,13 +343,17 @@ describe('ServiceNow catalog orchestration', function () {
       {
         destination: 'variables.event',
         source: { kind: 'jsonata', expression: 'trigger.event' }
+      },
+      {
+        destination: 'variables.queues',
+        source: { kind: 'path', path: 'workspace.metadata.queues' }
       }
     ];
     config.bodyTemplate.variables = {
       requesterEmail: 'admin@example.com',
       contributors: [
-        { email: 'ada@auckland.ac.nz' },
-        { email: 'grace@example.com' }
+        { name: 'Ada Example', email: 'ada@example.org' },
+        { name: 'Grace Sample', email: 'grace@example.com' }
       ]
     };
     config.requestFilters = [
@@ -339,14 +361,14 @@ describe('ServiceNow catalog orchestration', function () {
         destination: 'variables.requesterEmail',
         source: {
           kind: 'jsonata',
-          expression: '$substringAfter($lowercase(value), "@") = "auckland.ac.nz" ? value : null'
+          expression: '$substringAfter($lowercase(value), "@") = "example.org" ? value : null'
         }
       },
       {
         destination: 'variables.contributors',
         source: {
           kind: 'jsonata',
-          expression: '$append([], $filter(value, function($person) { $substringAfter($lowercase($string($person.email)), "@") = "auckland.ac.nz" }))'
+          expression: '$append([], $filter(value, function($person) { $substringAfter($lowercase($string($person.email)), "@") = "example.org" }))'
         }
       }
     ];
@@ -388,17 +410,19 @@ describe('ServiceNow catalog orchestration', function () {
     setHookTestGlobal('RecordsService', { getMeta, updateMeta, mutateMetaInternal });
     const audit = makeAuditService();
     setHookTestGlobal('IntegrationAuditService', audit);
+    setHookTestGlobal('ServicenowCatalogIdempotency', createTestIdempotencyLedger());
 
     const submittedWorkspace = workspace({
       parentOid: 'parent-1',
       title: 'Research storage',
-      status: 'Draft'
+      status: 'Draft',
+      queues: ['research', undefined]
     });
 
     const result = await service.submitRequest(
       'workspace-1',
       submittedWorkspace,
-      { catalog: 'storage-new', event: 'create' },
+      { catalog: 'storage-new', event: 'create', idempotencyKey: 'storage-request' },
       { username: 'researcher@example.edu' }
     );
 
@@ -417,7 +441,8 @@ describe('ServiceNow catalog orchestration', function () {
         short_description: 'Research storage',
         plan: 'Plan A (brand-a)',
         event: 'create',
-        contributors: [{ email: 'ada@auckland.ac.nz' }]
+        contributors: [{ name: 'Ada Example', email: 'ada@example.org' }],
+        queues: ['research', null]
       }
     });
     expect(addWorkspaceToRecord.mock.calls[0].arguments).to.deep.equal(['parent-1', 'workspace-1']);
@@ -435,8 +460,10 @@ describe('ServiceNow catalog orchestration', function () {
       metadata: { title: 'Plan A', existing: 'keep', servicenow_sys_id: 'sys-123' }
     });
 
-    const actions = audit.startAudit.mock.calls.map(call => call.arguments[1]);
+    const auditStarts = audit.startAudit.mock.calls;
+    const actions = auditStarts.map(call => call.arguments[1]);
     expect(actions).to.deep.equal([
+      'idempotencyDecision',
       'submitCatalogRequest',
       'parentLookup',
       'associateWorkspace',
@@ -444,16 +471,30 @@ describe('ServiceNow catalog orchestration', function () {
       'workspaceMetadataUpdate',
       'parentMetadataUpdate'
     ]);
-    const parentContext = audit.startAudit.mock.calls[0]?.result;
+    const [, parentStart, ...childStarts] = auditStarts;
+    const parentContext = parentStart?.result;
     expect(parentContext).to.exist;
     if (parentContext != null) {
-      for (const childCall of audit.startAudit.mock.calls.slice(1)) {
+      for (const childCall of childStarts) {
         expect(childCall.arguments[2]).to.include({
           traceId: parentContext.traceId,
           parentSpanId: parentContext.spanId
         });
       }
     }
+    const parentCompletion = audit.completeAudit.mock.calls.find(call =>
+      call.arguments[0].integrationAction === 'submitCatalogRequest'
+    );
+    expect(parentCompletion).to.exist;
+    expect(finalRequestSummary(...parentCompletion!.arguments)).to.deep.include({
+      catalog: 'storage-new',
+      event: 'create',
+      idempotencyKey: 'storage-request',
+      parentRecordOid: 'parent-1',
+      brandName: 'brand-a',
+      url: testServer.url + '/brand-catalog',
+      requestBody: captured[0].body
+    });
     expect(audit.failAudit.mock.calls).to.have.length(0);
   });
 
@@ -531,6 +572,35 @@ describe('ServiceNow catalog orchestration', function () {
       'submitCatalogRequest',
       'catalogOrderRequest'
     ]);
+  });
+
+  it('marks an outbound form-encoded catalog body as omitted from the audit', async function () {
+    let contentType: string | undefined;
+    const testServer = await listen(async (req, res) => {
+      contentType = req.headers['content-type'];
+      req.resume();
+      res.setHeader('Content-Type', 'application/json');
+      res.end('{}');
+    });
+    activeServer = testServer.server;
+    const config = createDefaultCatalogDefinition();
+    config.connection.url = testServer.url + '/catalog';
+    config.connection.headers = { 'Content-Type': 'application/x-www-form-urlencoded' };
+    configureBrandAndCatalog(config);
+    const audit = makeAuditService();
+    setHookTestGlobal('IntegrationAuditService', audit);
+
+    await service.submitRequest('workspace-form', workspace(), { catalog: 'storage-new', event: 'create' }, undefined);
+
+    expect(contentType).to.equal('application/x-www-form-urlencoded');
+    const parentCompletion = audit.completeAudit.mock.calls.find(call =>
+      call.arguments[0].integrationAction === 'submitCatalogRequest'
+    );
+    expect(parentCompletion).to.exist;
+    expect(finalRequestSummary(...parentCompletion!.arguments)).to.include({
+      requestBodyOmitted: true,
+      requestBodyContentType: contentType
+    }).and.not.to.have.property('requestBody');
   });
 
   it('rejects missing trigger context, unknown catalogs, and skips disabled catalogs', async function () {
@@ -638,7 +708,9 @@ describe('ServiceNow catalog orchestration', function () {
   });
 
   it('preserves the saved workspace after a bounded ServiceNow failure', async function () {
-    const testServer = await listen(async (_req, res) => {
+    const captured: CapturedRequest[] = [];
+    const testServer = await listen(async (req, res) => {
+      captured.push({ body: await readJson(req), headers: req.headers, method: req.method });
       res.statusCode = 503;
       res.setHeader('Content-Type', 'application/json');
       res.end(JSON.stringify({ error: 'unavailable' }));
@@ -652,6 +724,7 @@ describe('ServiceNow catalog orchestration', function () {
       maxDelayMs: 0,
       retryOnStatusCodes: [503]
     };
+    config.bodyTemplate.variables = { requesterName: 'Ada Example', requesterEmail: 'ada@example.org' };
     config.responseFields.workspace = [{
       destination: 'metadata.number',
       source: { kind: 'path', path: 'response.result.number' }
@@ -677,6 +750,8 @@ describe('ServiceNow catalog orchestration', function () {
 
     expect(result).to.include({ code: '503' });
     expect(result.message).to.contain('unavailable');
+    expect(captured).to.have.length(1);
+    expect(captured[0].method).to.equal('POST');
     expect(updateMeta.mock.calls).to.have.length(1);
     expect(updateMeta.mock.calls[0].arguments[1]).to.equal('workspace-http-failure');
     expect(updateMeta.mock.calls[0].arguments[2]).to.have.nested.property(
@@ -689,6 +764,18 @@ describe('ServiceNow catalog orchestration', function () {
     );
     expect(catalogFailure).to.exist;
     expect(catalogFailure?.arguments[2]?.responseSummary).to.deep.equal({ error: 'unavailable' });
+    const parentFailure = audit.failAudit.mock.calls.find(call =>
+      call.arguments[0].integrationAction === 'submitCatalogRequest'
+    );
+    expect(parentFailure).to.exist;
+    const [context, , details] = parentFailure!.arguments;
+    expect(finalRequestSummary(context, details)).to.deep.include({
+      catalog: 'storage-new',
+      event: 'update',
+      brandName: 'brand-a',
+      url: testServer.url + '/catalog',
+      requestBody: captured[0].body
+    });
   });
 
   it('rejects prior successful and interrupted idempotency keys', async function () {

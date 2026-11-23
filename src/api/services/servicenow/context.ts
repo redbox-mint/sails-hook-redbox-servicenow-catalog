@@ -26,6 +26,7 @@ export interface SubmitRunContext {
   brandName: string;
   triggeredBy?: string;
   parentAudit: IntegrationAuditContext | null;
+  catalogRequest?: { body?: string; contentType?: string };
   now: string;
   resourceClaims?: ResourceClaim[];
   dispatchStarted?: boolean;
